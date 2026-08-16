@@ -14,7 +14,7 @@ st.title("🧠 TBI / CQ500 Kesit İnceleme ve Etiketleme Paneli")
 
 # ── HUGGING FACE AYARLARI ────────────────────────────────────────
 # Kendi Hugging Face kullanıcı adı ve dataset adını buraya yazmalısın!
-HF_REPO_ID = "oya-ibb/CQ500_export300"  # Örn: "oyailgin/tbi-cq500-slices"
+HF_REPO_ID = "oyailgin/CQ500_export300"  # Örn: "oyailgin/tbi-cq500-slices"
 HF_TOKEN = st.secrets.get("HF_TOKEN", "token") # Veya Streamlit secrets'tan alır
 
 LOCAL_DATA_DIR = Path("extracted_data")
