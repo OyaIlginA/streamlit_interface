@@ -106,7 +106,7 @@ else:
             with cols[col_idx]:
                 pil_img = dcm_to_image(dcm_file)
                 if pil_img:
-                    st.image(pil_img, caption=f"Kesit {idx+1}", use_column_width=True)
+                    st.image(pil_img, caption=f"Kesit {idx+1}", use_container_width=True)
                 else:
                     st.error(f"Okunamadı")
         
