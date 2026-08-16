@@ -1,0 +1,5 @@
+doctor_name,patient_id,midline_shift_mm,mls_positive,basal_status,notes,timestamp
+oyasu123,CQ500CT1,0.2,0,Yok / Absent (2),deneme yapıyorum,2026-08-16 16:13:54.838230
+oyasu123,CQ500CT1,0.2,0,Yok / Absent (2),deneme yapıyorum,2026-08-16 16:14:00.627213
+oyasu123,CQ500CT1,0.7,1,Sıkışmış / Compressed (1),deneme yapıyorum inş olue,2026-08-16 16:17:07.069593
+Dr. Uzman,CQ500CT1,0.0,0,Normal (0),deneme2,2026-08-16 16:51:19.455575
