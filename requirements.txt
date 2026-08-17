@@ -4,3 +4,4 @@ pydicom
 pillow
 numpy
 huggingface_hub
+streamlit-image-coordinates
