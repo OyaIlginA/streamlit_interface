@@ -31,7 +31,7 @@ def download_and_extract_data():
         try:
             zip_path = hf_hub_download(
                 repo_id=HF_REPO_ID,
-                filename="TBI_Exact_300_Export_20260813_1341.zip",
+                filename="selected_slices.zip",
                 repo_type="dataset",
                 token=HF_TOKEN
             )
