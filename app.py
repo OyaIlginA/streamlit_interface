@@ -109,8 +109,8 @@ else:
 
         st.markdown("---")
 
-        # ── MIDLINE SHIFT İÇİN NOKTA İŞARETLEME ──────────────────
-        st.markdown("📍 **Midline Shift İşaretleme (2 nokta seçin)**")
+        # ── MIDLINE SHIFT İÇİN NOKTA İŞARETLEME (3 NOKTA) ────────
+        st.markdown("📍 **Midline Shift İşaretleme (3 nokta seçin)**")
 
         slice_names = [f"Kesit {i + 1}" for i in range(len(dcm_files))]
         selected_slice_idx = st.selectbox(
@@ -141,12 +141,12 @@ else:
             if coords is not None:
                 new_point = (coords["x"], coords["y"])
                 if not st.session_state[points_key] or st.session_state[points_key][-1] != new_point:
-                    if len(st.session_state[points_key]) >= 2:
+                    if len(st.session_state[points_key]) >= 3:
                         st.session_state[points_key] = []
                     st.session_state[points_key].append(new_point)
                     st.rerun()
 
-            st.caption(f"İşaretlenen nokta sayısı: {len(st.session_state[points_key])}/2")
+            st.caption(f"İşaretlenen nokta sayısı: {len(st.session_state[points_key])}/3")
             if st.button("🔄 Noktaları Temizle"):
                 st.session_state[points_key] = []
                 st.rerun()
@@ -158,10 +158,10 @@ else:
             st.subheader("📋 Klinik Değerlendirme Formu")
 
             points = st.session_state.get(points_key, [])
-            if len(points) == 2:
-                st.success(f"Midline noktaları: {points[0]} , {points[1]}")
+            if len(points) == 3:
+                st.success(f"Noktalar: {points[0]} , {points[1]} , {points[2]}")
             else:
-                st.warning("⚠️ Kaydetmeden önce yukarıda 2 nokta işaretlemelisiniz.")
+                st.warning("⚠️ Kaydetmeden önce yukarıda tam olarak 3 nokta işaretlemelisiniz.")
 
             basal_status = st.selectbox(
                 "Bazal Sistern Durumu",
@@ -172,18 +172,20 @@ else:
             submitted = st.form_submit_button("💾 İşaretlemeyi Kaydet ve HF'ye Gönder")
 
             if submitted:
-                if len(points) != 2:
-                    st.error("Kaydetmeden önce tam olarak 2 nokta işaretlemelisiniz.")
+                if len(points) != 3:
+                    st.error("Kaydetmeden önce tam olarak 3 nokta işaretlemelisiniz.")
                     st.stop()
 
                 new_record = {
                     "doctor_name": doctor_name,
                     "patient_id": selected_patient,
                     "slice_idx": selected_slice_idx,
-                    "mls_point1_x": points[0][0],
-                    "mls_point1_y": points[0][1],
-                    "mls_point2_x": points[1][0],
-                    "mls_point2_y": points[1][1],
+                    "point1_x": points[0][0],
+                    "point1_y": points[0][1],
+                    "point2_x": points[1][0],
+                    "point2_y": points[1][1],
+                    "point3_x": points[2][0],
+                    "point3_y": points[2][1],
                     "basal_status": basal_status,
                     "notes": notes,
                     "timestamp": str(pd.Timestamp.now())
@@ -204,14 +206,17 @@ else:
                 if local_csv.exists():
                     df_old = pd.read_csv(local_csv)
 
+                    # eski CSV'de olmayan sütunları ekle (geriye dönük uyumluluk)
+                    for col in new_record.keys():
+                        if col not in df_old.columns:
+                            df_old[col] = None
+
                     # aynı hasta + aynı kesit için upsert (üzerine yaz)
                     mask = (df_old["patient_id"] == selected_patient) & \
                            (df_old["slice_idx"] == selected_slice_idx)
 
                     if mask.any():
                         for col, val in new_record.items():
-                            if col not in df_old.columns:
-                                df_old[col] = None
                             df_old.loc[mask, col] = val
                         df_combined = df_old
                     else:
