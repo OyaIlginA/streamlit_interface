@@ -5,3 +5,12 @@ pillow
 numpy
 huggingface_hub
 streamlit-image-coordinates
+pydicom
+streamlit
+opencv-python
+numpy
+pillow
+pylibjpeg
+pylibjpeg-libjpeg
+python-dotenv
+huggingface_hub
