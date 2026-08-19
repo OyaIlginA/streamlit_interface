@@ -90,10 +90,43 @@ else:
 if not patients:
     st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya adını kontrol edin.")
 else:
-    selected_patient = st.sidebar.selectbox("📂 Hasta Seçin", patients)
+    # ── 1. SESSION STATE İLE İLERİ / GERİ HASTA GEZİNME MANTIĞI ──
+    if "patient_index" not in st.session_state:
+        st.session_state.patient_index = 0
+
+    st.sidebar.markdown("### 📂 Hasta Gezinme")
+    
+    # Sol menüye İleri / Geri butonları yerleştirelim
+    col_prev, col_next = st.sidebar.columns(2)
+    with col_prev:
+        if st.button("⬅️ Önceki"):
+            if st.session_state.patient_index > 0:
+                st.session_state.patient_index -= 1
+                st.rerun()
+    with col_next:
+        if st.button("Sonraki ➡️"):
+            if st.session_state.patient_index < len(patients) - 1:
+                st.session_state.patient_index += 1
+                st.rerun()
+
+    # Listeden seçilen güncel hasta (selectbox ile de senkronize edilebilir)
+    selected_patient = st.sidebar.selectbox(
+        "Hasta Seçin", 
+        patients, 
+        index=st.session_state.patient_index,
+        key="selected_patient_selectbox"
+    )
+    
+    # Selectbox'tan manuel seçim yapılırsa index'i güncelle
+    st.session_state.patient_index = patients.index(selected_patient)
+
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
-    st.subheader(f"Seçilen Hasta: {selected_patient}")
+    # ── 2. DOKTOR / HASTA TAKİP BİLGİSİ ──
+    st.subheader(f"Seçilen Hasta: {selected_patient} ({st.session_state.patient_index + 1}/{len(patients)})")
+    
+    # Hangi hastanın hangi doktor/notla ilişkili olduğunu hatırlatan bilgi kutusu
+    st.info(f"👤 **Aktif İnceleme Sorumlusu:** {doctor_name} | **Durum:** Veriler ve kesitler incelenmeye hazır.")
 
     patient_folder = slices_root / selected_patient
     dcm_files = sorted(list(patient_folder.glob("*.dcm")))
