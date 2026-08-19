@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 import pydicom
+import traceback
 import numpy as np
 from PIL import Image
 import os
@@ -67,8 +68,11 @@ def dcm_to_image(dcm_path):
         arr = arr.astype(np.uint8)
 
         return Image.fromarray(arr)
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"--- HATA DETAYI ---")
+        print(f"Dosya: {dcm_path}")
+        print(f"Hata mesajı: {str(e)}")
+        traceback.print_exc() # Tüm hata izini konsola dök
 
 
 # Klasör yapısını bulma (selected_slices nerede kaldıysa)
