@@ -122,6 +122,25 @@ else:
 
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
+    # ── HASTAYA AİT GEÇMİŞ DOKTOR TEŞHİSLERİ / NOTLARI ──
+    st.markdown("---")
+    st.markdown("📜 **Bu Hasta İçin Geçmiş Etiketler ve Teşhisler:**")
+    
+    local_csv = Path(ANNOTATION_FILE)
+    if local_csv.exists():
+        df_existing = pd.read_csv(local_csv)
+        # Seçilen hastaya ait kayıtları filtrele
+        patient_history = df_existing[df_existing["patient_id"].astype(str) == str(selected_patient)]
+        
+        if not patient_history.empty:
+            # Sadece önemli kolonları gösterelim (Doktor adı, tarih, bazal durum, notlar vb.)
+            display_cols = [c for c in ["doctor_name", "timestamp", "basal_status", "notes"] if c in patient_history.columns]
+            st.dataframe(patient_history[display_cols], use_container_width=True)
+        else:
+            st.info("ℹ️ Bu hasta için henüz kayıt girilmemiş veya etiketleme yapılmamış.")
+    else:
+        st.info("ℹ️ Henüz sistemde kayıtlı annotation dosyası yok.")
+
     # ── 2. DOKTOR / HASTA TAKİP BİLGİSİ ──
     st.subheader(f"Seçilen Hasta: {selected_patient} ({st.session_state.patient_index + 1}/{len(patients)})")
     
