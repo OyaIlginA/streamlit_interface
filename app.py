@@ -28,23 +28,42 @@ def download_and_extract_data():
     """Hugging Face'teki private dataset'ten zip'i indirip çözer"""
     if not LOCAL_DATA_DIR.exists():
         os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
-        st.info("🔄 Veriler Hugging Face'ten indiriliyor, lütfen bekleyin...")
-        try:
-            zip_path = hf_hub_download(
-                repo_id=HF_REPO_ID,
-                filename="selected_slices.zip",
-                repo_type="dataset",
-                token=HF_TOKEN
-            )
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(LOCAL_DATA_DIR)
-            st.success("✅ Veriler başarıyla yüklendi!")
-        except Exception as e:
-            st.error(f"Veri indirilirken hata oluştu: {e}")
+        
+    st.info("🔄 Veriler Hugging Face'ten indiriliyor, lütfen bekleyin...")
+    try:
+        zip_path = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename="selected_slices.zip",
+            repo_type="dataset",
+            token=HF_TOKEN
+        )
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(LOCAL_DATA_DIR)
+        st.success("✅ Veriler başarıyla yüklendi!")
+    except Exception as e:
+        st.error(f"Veri indirilirken hata oluştu: {e}")
 
-
-download_and_extract_data()
-
+    # --- KONSOLA DETAYLI RAPOR YAZDIRMA ---
+    print("--- 🔍 STREAMLIT CLOUD KLASÖR ANALİZİ ---")
+    print(f"LOCAL_DATA_DIR içeriği: {os.listdir(LOCAL_DATA_DIR)}")
+    
+    # Slices root nerede kalmış kontrol edelim
+    test_root = LOCAL_DATA_DIR / "selected_slices"
+    if not test_root.exists():
+        sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
+        print(f"Alt klasörler tespit edildi: {[d.name for d in sub_dirs]}")
+        if sub_dirs:
+            test_root = sub_dirs[0] / "selected_slices"
+            
+    print(f"Test edilen root yolu: {test_root}")
+    if test_root.exists():
+        found_patients = [p.name for p in test_root.iterdir() if p.is_dir()]
+        print(f"📦 Konsolda okunan toplam hasta klasörü sayısı: {len(found_patients)}")
+        print(f"İlk 5 hasta ID'si: {found_patients[:5]}")
+        print(f"Son 5 hasta ID'si: {found_patients[-5:]}")
+    else:
+        print("❌ HATA: selected_slices klasörü bu yolda bulunamadı!")
+    print("----------------------------------------")
 
 # ── DICOM GÖRSELLEŞTİRME ────────────────────────────────────────
 def dcm_to_image(dcm_path):
