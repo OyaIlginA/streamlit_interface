@@ -14,9 +14,10 @@ st.set_page_config(page_title="TBI Doktor Etiketleme Paneli", layout="wide")
 
 st.title("🧠 TBI / CQ500 Kesit İnceleme ve Etiketleme Paneli")
 
-# ── HUGGING FACE AYARLARI ────────────────────────────────────────
+# ── HUGGING FACE VE DOSYA AYARLARI ────────────────────────────────
 HF_REPO_ID = "oyailgin/CQ500_export300"
 HF_TOKEN = st.secrets.get("HF_TOKEN", "token")
+ZIP_FILENAME = "cq500_dual_slices.zip" # Burayı kendi yeni zip dosya adınla değiştirebilirsin
 
 LOCAL_DATA_DIR = Path("extracted_data")
 ANNOTATION_FILE = "doctor_annotations.csv"
@@ -33,7 +34,7 @@ def download_and_extract_data():
     try:
         zip_path = hf_hub_download(
             repo_id=HF_REPO_ID,
-            filename="cq500_dual_slices.zip",
+            filename=ZIP_FILENAME,
             repo_type="dataset",
             token=HF_TOKEN
         )
@@ -42,25 +43,6 @@ def download_and_extract_data():
         st.success("✅ Veriler başarıyla yüklendi!")
     except Exception as e:
         st.error(f"Veri indirilirken hata oluştu: {e}")
-
-    # --- KONSOLA DETAYLI RAPOR YAZDIRMA ---
-    print("--- 🔍 STREAMLIT CLOUD KLASÖR ANALİZİ ---")
-    print(f"LOCAL_DATA_DIR içeriği: {os.listdir(LOCAL_DATA_DIR)}")
-    
-    test_root = LOCAL_DATA_DIR / "selected_slices"
-    if not test_root.exists():
-        sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
-        print(f"Alt klasörler tespit edildi: {[d.name for d in sub_dirs]}")
-        if sub_dirs:
-            test_root = sub_dirs[0] / "selected_slices"
-            
-    print(f"Test edilen root yolu: {test_root}")
-    if test_root.exists():
-        found_patients = [p.name for p in test_root.iterdir() if p.is_dir()]
-        print(f"📦 Konsolda okunan toplam hasta klasörü sayısı: {len(found_patients)}")
-    else:
-        print("❌ HATA: selected_slices klasörü bu yolda bulunamadı!")
-    print("----------------------------------------")
 
 download_and_extract_data()
 
@@ -93,22 +75,39 @@ def dcm_to_image(dcm_path):
         traceback.print_exc()
         return None
 
-# Klasör yapısını bulma
+# Klasör yapısını bulma (İkili yapıya uyumlu arama)
 slices_root = LOCAL_DATA_DIR / "selected_slices"
 if not slices_root.exists():
+    # Eğer doğrudan hasta klasörleri ana dizindeyse veya başka bir alt klasördeyse bul
     sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
-    if sub_dirs:
-        slices_root = sub_dirs[0] / "selected_slices"
+    for d in sub_dirs:
+        if (d / "ssa_slices").exists() or (d / "all_slices").exists():
+            slices_root = d
+            break
+    if not slices_root.exists() and sub_dirs:
+        slices_root = sub_dirs[0]
 
-if slices_root.exists():
-    patients = sorted([p.name for p in slices_root.iterdir() if p.is_dir()])
+# Hasta listesini dinamik olarak çıkar
+if LOCAL_DATA_DIR.exists():
+    patients = sorted([p.name for p in LOCAL_DATA_DIR.iterdir() if p.is_dir() and p.name != "__MACOSX"])
+    # Eğer iç içe klasör yapısı varsa düzelt
+    if len(patients) == 1 and (LOCAL_DATA_DIR / patients[0]).is_dir():
+        inner_path = LOCAL_DATA_DIR / patients[0]
+        # Eğer içerde hasta klasörleri varsa
+        sub_pats = sorted([p.name for p in inner_path.iterdir() if p.is_dir()])
+        if any("CQ500" in p for p in sub_pats):
+            LOCAL_DATA_DIR = inner_path
+            patients = sub_pats
 else:
     patients = []
 
+# Güvenli hasta listesi filtrelemesi (Sadece CQ500 ile başlayanlar veya geçerli klasörler)
+patients = sorted([p for p in os.listdir(LOCAL_DATA_DIR) if os.path.isdir(LOCAL_DATA_DIR / p) and p != "__MACOSX"])
+
 if not patients:
-    st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya adını kontrol edin.")
+    st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya yapısını kontrol edin.")
 else:
-    # ── 1. SESSION STATE İLE İLERİ / GERİ HASTA GEZİNME MANTIĞI ──
+    # ── 1. SESSION STATE İLE KARARLI HASTA GEZİNME MANTIĞI ──
     if "patient_index" not in st.session_state:
         st.session_state.patient_index = 0
 
@@ -116,15 +115,20 @@ else:
     
     col_prev, col_next = st.sidebar.columns(2)
     with col_prev:
-        if st.button("⬅️ Önceki"):
+        if st.button("⬅️ Önceki Hasta", use_container_width=True):
             if st.session_state.patient_index > 0:
                 st.session_state.patient_index -= 1
-                st.rerun()
+            else:
+                st.session_state.patient_index = len(patients) - 1 # Başa sarma opsiyonel
+            st.rerun()
+            
     with col_next:
-        if st.button("Sonraki ➡️"):
+        if st.button("Sonraki Hasta ➡️", use_container_width=True):
             if st.session_state.patient_index < len(patients) - 1:
                 st.session_state.patient_index += 1
-                st.rerun()
+            else:
+                st.session_state.patient_index = 0
+            st.rerun()
 
     selected_patient = st.sidebar.selectbox(
         "Hasta Seçin", 
@@ -133,7 +137,11 @@ else:
         key="selected_patient_selectbox"
     )
     
-    st.session_state.patient_index = patients.index(selected_patient)
+    # Selectbox ile sidebar butonları senkronizasyonu
+    if patients.index(selected_patient) != st.session_state.patient_index:
+        st.session_state.patient_index = patients.index(selected_patient)
+        st.rerun()
+
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
     # ── HASTAYA AİT GEÇMİŞ DOKTOR TEŞHİSLERİ / NOTLARI ──
@@ -149,7 +157,7 @@ else:
             display_cols = [c for c in ["doctor_name", "timestamp", "basal_status", "notes"] if c in patient_history.columns]
             st.dataframe(patient_history[display_cols], use_container_width=True)
         else:
-            st.info("ℹ️ Bu hasta için henüz kayıt girilmemiş veya etiketleme yapılmamış.")
+            st.info("ℹ️ Bu hasta için henüz kayıt girilmemiş.")
     else:
         st.info("ℹ️ Henüz sistemde kayıtlı annotation dosyası yok.")
 
@@ -157,8 +165,12 @@ else:
     st.subheader(f"Seçilen Hasta: {selected_patient} ({st.session_state.patient_index + 1}/{len(patients)})")
     st.info(f"👤 **Aktif İnceleme Sorumlusu:** {doctor_name} | **Durum:** Veriler ve kesitler incelenmeye hazır.")
 
-    patient_folder = slices_root / selected_patient
-    dcm_files = sorted(list(patient_folder.glob("*.dcm")))
+    # SSA Slices Klasör Yolu
+    patient_folder = LOCAL_DATA_DIR / selected_patient
+    ssa_folder = patient_folder / "ssa_slices"
+    target_dcm_folder = ssa_folder if ssa_folder.exists() else patient_folder
+    
+    dcm_files = sorted(list(target_dcm_folder.glob("*.dcm")))
 
     if dcm_files:
         st.markdown("🔍 **SSA Algoritması Tarafından Seçilen Kesitler (DICOM):**")
@@ -297,59 +309,59 @@ else:
                     st.error(f"Kayıt yapıldı ancak HF'ye yüklenirken hata oluştu: {e}")
 
 # ==============================================================================
-# 🧠 EN ALTA EKLENEN: HASTAYA AİT TÜM SLICELARI GEZME EKRANI (ALL_SLICES)
+# 🧠 EN ALTA EKLENEN: TÜM KESİTLER GEZME EKRANI (ALL_SLICES - BUTONLU SİSTEM)
 # ==============================================================================
 st.markdown("---")
 st.markdown("### 🩻 Tüm Kesitler Gezinme Paneli (`all_slices`)")
 
-if 'patients' in locals() and patients:
-    # Üst kısımdaki seçili hastayı burada da baz alabiliriz veya ayrı bir selectbox koyabiliriz
-    all_slices_patient = st.selectbox(
-        "Tüm Kesitleri İncelemek İçin Hasta Seçin", 
-        patients, 
-        index=st.session_state.patient_index,
-        key="all_slices_patient_select"
-    )
+if patients:
+    # Session state içinde tüm kesitler için index takibi
+    if "all_slice_index" not in st.session_state:
+        st.session_state.all_slice_index = 0
 
-    # İkili yapındaki all_slices klasör yolu (Eğer ana dizinde all_slices varsa)
-    # Not: Eğer veri setinde her hastanın altında all_slices klasörü varsa:
-    all_slices_folder = slices_root.parent / all_slices_patient / "all_slices"
-    
-    # Alternatif olarak doğrudan patient_folder altındaysa oraya da bakabiliriz:
+    all_slices_folder = LOCAL_DATA_DIR / selected_patient / "all_slices"
     if not all_slices_folder.exists():
-        all_slices_folder = slices_root / all_slices_patient / "all_slices"
+        all_slices_folder = patient_folder / "all_slices"
 
     if all_slices_folder.exists():
         all_dcm_files = sorted(list(all_slices_folder.glob("*.dcm")))
     else:
-        # Eğer klasör yapısı farklı açıldıysa veya henüz all_slices ziplenmediyse genel klasörden dene
-        all_dcm_files = sorted(list((slices_root / all_slices_patient).glob("*.dcm")))
+        all_dcm_files = sorted(list(patient_folder.glob("*.dcm")))
 
     if all_dcm_files:
-        st.info(f"📂 **{all_slices_patient}** için toplam **{len(all_dcm_files)}** kesit bulundu.")
-        
-        # Slider ile kesitler arasında akıcı gezinme
-        slice_slider_idx = st.slider(
-            "Kesit Seçin (Z-Ekseni)", 
-            min_value=0, 
-            max_value=len(all_dcm_files) - 1, 
-            value=0,
-            format="Kesit %d"
-        )
+        # Hasta değiştiğinde slice index sınır aşımını önle
+        if st.session_state.all_slice_index >= len(all_dcm_files):
+            st.session_state.all_slice_index = 0
 
-        current_dcm = all_dcm_files[slice_slider_idx]
+        st.info(f"📂 **{selected_patient}** için toplam **{len(all_dcm_files)}** kesit mevcut.")
+
+        # Slider yerine kullanışlı İleri / Geri Butonları
+        b_col1, b_col_info, b_col2 = st.columns([1, 2, 1])
+        
+        with b_col1:
+            if st.button("⬅️ Önceki Kesit", use_container_width=True, key="prev_slice_btn"):
+                if st.session_state.all_slice_index > 0:
+                    st.session_state.all_slice_index -= 1
+                    st.rerun()
+
+        with b_col2:
+            if st.button("Sonraki Kesit ➡️", use_container_width=True, key="next_slice_btn"):
+                if st.session_state.all_slice_index < len(all_dcm_files) - 1:
+                    st.session_state.all_slice_index += 1
+                    st.rerun()
+
+        current_dcm = all_dcm_files[st.session_state.all_slice_index]
         pil_all_img = dcm_to_image(current_dcm)
 
         if pil_all_img:
-            # Görseli ortalanmış ve daha büyük şekilde gösterelim
             col_img1, col_img_mid, col_img2 = st.columns([1, 2, 1])
             with col_img_mid:
                 st.image(
                     pil_all_img, 
-                    caption=f"Dosya: {current_dcm.name} (Sıra: {slice_slider_idx + 1}/{len(all_dcm_files)})", 
+                    caption=f"Dosya: {current_dcm.name} (Kesit: {st.session_state.all_slice_index + 1} / {len(all_dcm_files)})", 
                     use_container_width=True
                 )
         else:
             st.error("Bu kesit görselleştirilemedi.")
     else:
-        st.warning(f"⚠️ `{all_slices_patient}` için `all_slices` klasöründe DICOM dosyası bulunamadı.")
+        st.warning(f"⚠️ `{selected_patient}` için `all_slices` klasöründe DICOM dosyası bulunamadı.")
