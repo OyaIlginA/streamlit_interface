@@ -33,7 +33,7 @@ def download_and_extract_data():
     try:
         zip_path = hf_hub_download(
             repo_id=HF_REPO_ID,
-            filename="selected_slices.zip",
+            filename="cq500_dual_slices.zip",
             repo_type="dataset",
             token=HF_TOKEN
         )
@@ -47,7 +47,6 @@ def download_and_extract_data():
     print("--- 🔍 STREAMLIT CLOUD KLASÖR ANALİZİ ---")
     print(f"LOCAL_DATA_DIR içeriği: {os.listdir(LOCAL_DATA_DIR)}")
     
-    # Slices root nerede kalmış kontrol edelim
     test_root = LOCAL_DATA_DIR / "selected_slices"
     if not test_root.exists():
         sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
@@ -59,11 +58,11 @@ def download_and_extract_data():
     if test_root.exists():
         found_patients = [p.name for p in test_root.iterdir() if p.is_dir()]
         print(f"📦 Konsolda okunan toplam hasta klasörü sayısı: {len(found_patients)}")
-        print(f"İlk 5 hasta ID'si: {found_patients[:5]}")
-        print(f"Son 5 hasta ID'si: {found_patients[-5:]}")
     else:
         print("❌ HATA: selected_slices klasörü bu yolda bulunamadı!")
     print("----------------------------------------")
+
+download_and_extract_data()
 
 # ── DICOM GÖRSELLEŞTİRME ────────────────────────────────────────
 def dcm_to_image(dcm_path):
@@ -91,10 +90,10 @@ def dcm_to_image(dcm_path):
         print(f"--- HATA DETAYI ---")
         print(f"Dosya: {dcm_path}")
         print(f"Hata mesajı: {str(e)}")
-        traceback.print_exc() # Tüm hata izini konsola dök
+        traceback.print_exc()
+        return None
 
-
-# Klasör yapısını bulma (selected_slices nerede kaldıysa)
+# Klasör yapısını bulma
 slices_root = LOCAL_DATA_DIR / "selected_slices"
 if not slices_root.exists():
     sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
@@ -115,7 +114,6 @@ else:
 
     st.sidebar.markdown("### 📂 Hasta Gezinme")
     
-    # Sol menüye İleri / Geri butonları yerleştirelim
     col_prev, col_next = st.sidebar.columns(2)
     with col_prev:
         if st.button("⬅️ Önceki"):
@@ -128,7 +126,6 @@ else:
                 st.session_state.patient_index += 1
                 st.rerun()
 
-    # Listeden seçilen güncel hasta (selectbox ile de senkronize edilebilir)
     selected_patient = st.sidebar.selectbox(
         "Hasta Seçin", 
         patients, 
@@ -136,9 +133,7 @@ else:
         key="selected_patient_selectbox"
     )
     
-    # Selectbox'tan manuel seçim yapılırsa index'i güncelle
     st.session_state.patient_index = patients.index(selected_patient)
-
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
     # ── HASTAYA AİT GEÇMİŞ DOKTOR TEŞHİSLERİ / NOTLARI ──
@@ -148,11 +143,9 @@ else:
     local_csv = Path(ANNOTATION_FILE)
     if local_csv.exists():
         df_existing = pd.read_csv(local_csv)
-        # Seçilen hastaya ait kayıtları filtrele
         patient_history = df_existing[df_existing["patient_id"].astype(str) == str(selected_patient)]
         
         if not patient_history.empty:
-            # Sadece önemli kolonları gösterelim (Doktor adı, tarih, bazal durum, notlar vb.)
             display_cols = [c for c in ["doctor_name", "timestamp", "basal_status", "notes"] if c in patient_history.columns]
             st.dataframe(patient_history[display_cols], use_container_width=True)
         else:
@@ -162,8 +155,6 @@ else:
 
     # ── 2. DOKTOR / HASTA TAKİP BİLGİSİ ──
     st.subheader(f"Seçilen Hasta: {selected_patient} ({st.session_state.patient_index + 1}/{len(patients)})")
-    
-    # Hangi hastanın hangi doktor/notla ilişkili olduğunu hatırlatan bilgi kutusu
     st.info(f"👤 **Aktif İnceleme Sorumlusu:** {doctor_name} | **Durum:** Veriler ve kesitler incelenmeye hazır.")
 
     patient_folder = slices_root / selected_patient
@@ -203,14 +194,12 @@ else:
             mark_img_rgb = mark_img.convert("RGB")
             draw_arr = np.array(mark_img_rgb)
 
-            # önceden işaretlenmiş noktaları görselde göster
             for (px, py) in st.session_state[points_key]:
                 y0, y1 = max(0, py - 3), min(draw_arr.shape[0], py + 3)
                 x0, x1 = max(0, px - 3), min(draw_arr.shape[1], px + 3)
                 draw_arr[y0:y1, x0:x1] = [255, 0, 0]
 
             display_img = Image.fromarray(draw_arr)
-
             coords = streamlit_image_coordinates(display_img, key=f"click_{points_key}")
 
             if coords is not None:
@@ -255,22 +244,17 @@ else:
                     "doctor_name": doctor_name,
                     "patient_id": selected_patient,
                     "slice_idx": selected_slice_idx,
-                    "point1_x": points[0][0],
-                    "point1_y": points[0][1],
-                    "point2_x": points[1][0],
-                    "point2_y": points[1][1],
-                    "point3_x": points[2][0],
-                    "point3_y": points[2][1],
+                    "point1_x": points[0][0], "point1_y": points[0][1],
+                    "point2_x": points[1][0], "point2_y": points[1][1],
+                    "point3_x": points[2][0], "point3_y": points[2][1],
                     "basal_status": basal_status,
                     "notes": notes,
                     "timestamp": str(pd.Timestamp.now())
                 }
 
-                # reads.csv içinden bu hastaya ait orijinal satırı bul ve birleştir
                 if READS_CSV_PATH.exists():
                     df_reads = pd.read_csv(READS_CSV_PATH)
                     patient_meta = df_reads[df_reads['name'].astype(str) == str(selected_patient)]
-
                     if not patient_meta.empty:
                         meta_dict = patient_meta.iloc[0].to_dict()
                         new_record.update(meta_dict)
@@ -280,13 +264,10 @@ else:
 
                 if local_csv.exists():
                     df_old = pd.read_csv(local_csv)
-
-                    # eski CSV'de olmayan sütunları ekle (geriye dönük uyumluluk)
                     for col in new_record.keys():
                         if col not in df_old.columns:
                             df_old[col] = None
 
-                    # aynı hasta + aynı kesit için upsert (üzerine yaz)
                     mask = (df_old["patient_id"] == selected_patient) & \
                            (df_old["slice_idx"] == selected_slice_idx)
 
@@ -301,7 +282,6 @@ else:
 
                 df_combined.to_csv(local_csv, index=False)
 
-                # Hugging Face Dataset'e güncellemeyi gönder
                 try:
                     api = HfApi(token=HF_TOKEN)
                     api.upload_file(
@@ -315,3 +295,61 @@ else:
                     st.session_state[points_key] = []
                 except Exception as e:
                     st.error(f"Kayıt yapıldı ancak HF'ye yüklenirken hata oluştu: {e}")
+
+# ==============================================================================
+# 🧠 EN ALTA EKLENEN: HASTAYA AİT TÜM SLICELARI GEZME EKRANI (ALL_SLICES)
+# ==============================================================================
+st.markdown("---")
+st.markdown("### 🩻 Tüm Kesitler Gezinme Paneli (`all_slices`)")
+
+if 'patients' in locals() and patients:
+    # Üst kısımdaki seçili hastayı burada da baz alabiliriz veya ayrı bir selectbox koyabiliriz
+    all_slices_patient = st.selectbox(
+        "Tüm Kesitleri İncelemek İçin Hasta Seçin", 
+        patients, 
+        index=st.session_state.patient_index,
+        key="all_slices_patient_select"
+    )
+
+    # İkili yapındaki all_slices klasör yolu (Eğer ana dizinde all_slices varsa)
+    # Not: Eğer veri setinde her hastanın altında all_slices klasörü varsa:
+    all_slices_folder = slices_root.parent / all_slices_patient / "all_slices"
+    
+    # Alternatif olarak doğrudan patient_folder altındaysa oraya da bakabiliriz:
+    if not all_slices_folder.exists():
+        all_slices_folder = slices_root / all_slices_patient / "all_slices"
+
+    if all_slices_folder.exists():
+        all_dcm_files = sorted(list(all_slices_folder.glob("*.dcm")))
+    else:
+        # Eğer klasör yapısı farklı açıldıysa veya henüz all_slices ziplenmediyse genel klasörden dene
+        all_dcm_files = sorted(list((slices_root / all_slices_patient).glob("*.dcm")))
+
+    if all_dcm_files:
+        st.info(f"📂 **{all_slices_patient}** için toplam **{len(all_dcm_files)}** kesit bulundu.")
+        
+        # Slider ile kesitler arasında akıcı gezinme
+        slice_slider_idx = st.slider(
+            "Kesit Seçin (Z-Ekseni)", 
+            min_value=0, 
+            max_value=len(all_dcm_files) - 1, 
+            value=0,
+            format="Kesit %d"
+        )
+
+        current_dcm = all_dcm_files[slice_slider_idx]
+        pil_all_img = dcm_to_image(current_dcm)
+
+        if pil_all_img:
+            # Görseli ortalanmış ve daha büyük şekilde gösterelim
+            col_img1, col_img_mid, col_img2 = st.columns([1, 2, 1])
+            with col_img_mid:
+                st.image(
+                    pil_all_img, 
+                    caption=f"Dosya: {current_dcm.name} (Sıra: {slice_slider_idx + 1}/{len(all_dcm_files)})", 
+                    use_container_width=True
+                )
+        else:
+            st.error("Bu kesit görselleştirilemedi.")
+    else:
+        st.warning(f"⚠️ `{all_slices_patient}` için `all_slices` klasöründe DICOM dosyası bulunamadı.")
