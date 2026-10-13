@@ -107,40 +107,63 @@ patients = sorted([p for p in os.listdir(LOCAL_DATA_DIR) if os.path.isdir(LOCAL_
 if not patients:
     st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya yapısını kontrol edin.")
 else:
-    # ── 1. SESSION STATE İLE KARARLI HASTA GEZİNME MANTIĞI ──
+     # ── 1. HASTA GEZİNME ──
     if "patient_index" not in st.session_state:
         st.session_state.patient_index = 0
 
-    st.sidebar.markdown("### 📂 Hasta Gezinme")
-    
-    col_prev, col_next = st.sidebar.columns(2)
-    with col_prev:
-        if st.button("⬅️ Önceki Hasta", use_container_width=True):
-            if st.session_state.patient_index > 0:
-                st.session_state.patient_index -= 1
-            else:
-                st.session_state.patient_index = len(patients) - 1 # Başa sarma opsiyonel
-            st.rerun()
-            
-    with col_next:
-        if st.button("Sonraki Hasta ➡️", use_container_width=True):
-            if st.session_state.patient_index < len(patients) - 1:
-                st.session_state.patient_index += 1
-            else:
-                st.session_state.patient_index = 0
-            st.rerun()
-
-    selected_patient = st.sidebar.selectbox(
-        "Hasta Seçin", 
-        patients, 
-        index=st.session_state.patient_index,
-        key="selected_patient_selectbox"
+    # Hasta listesi değişmişse indeksi geçerli tut
+    st.session_state.patient_index = min(
+        st.session_state.patient_index, len(patients) - 1
     )
-    
-    # Selectbox ile sidebar butonları senkronizasyonu
-    if patients.index(selected_patient) != st.session_state.patient_index:
-        st.session_state.patient_index = patients.index(selected_patient)
-        st.rerun()
+
+    def previous_patient():
+        st.session_state.patient_index = (
+            st.session_state.patient_index - 1
+        ) % len(patients)
+
+    def next_patient():
+        st.session_state.patient_index = (
+            st.session_state.patient_index + 1
+        ) % len(patients)
+
+    def sync_patient():
+        st.session_state.patient_index = patients.index(
+            st.session_state.selected_patient_selectbox
+        )
+        st.session_state.all_slice_index = 0
+
+    st.sidebar.markdown("### 📂 Hasta Gezinme")
+
+    col_prev, col_next = st.sidebar.columns(2)
+
+    col_prev.button(
+        "⬅️ Önceki Hasta",
+        use_container_width=True,
+        on_click=previous_patient,
+        key="prev_patient_btn"
+    )
+
+    col_next.button(
+        "Sonraki Hasta ➡️",
+        use_container_width=True,
+        on_click=next_patient,
+        key="next_patient_btn"
+    )
+
+    # Hasta seçimi ve gezinme indeksi aynı kaynağı kullanır
+    st.session_state.selected_patient_selectbox = patients[
+        st.session_state.patient_index
+    ]
+
+    st.sidebar.selectbox(
+        "Hasta Seçin",
+        patients,
+        key="selected_patient_selectbox",
+        on_change=sync_patient
+    )
+
+    selected_patient = patients[st.session_state.patient_index]
+
 
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
@@ -308,60 +331,128 @@ else:
                 except Exception as e:
                     st.error(f"Kayıt yapıldı ancak HF'ye yüklenirken hata oluştu: {e}")
 
-# ==============================================================================
-# 🧠 EN ALTA EKLENEN: TÜM KESİTLER GEZME EKRANI (ALL_SLICES - BUTONLU SİSTEM)
-# ==============================================================================
+
+# ── TÜM KESİTLER: IZGARA VE BÜYÜK GÖRÜNÜM ──
+
 st.markdown("---")
-st.markdown("### 🩻 Tüm Kesitler Gezinme Paneli (`all_slices`)")
+st.markdown("### 🩻 Tüm Kesitler — Izgara Görünümü")
 
 if patients:
-    # Session state içinde tüm kesitler için index takibi
+    
     if "all_slice_index" not in st.session_state:
         st.session_state.all_slice_index = 0
 
-    all_slices_folder = LOCAL_DATA_DIR / selected_patient / "all_slices"
-    if not all_slices_folder.exists():
-        all_slices_folder = patient_folder / "all_slices"
+    patient_folder = LOCAL_DATA_DIR / selected_patient
+    all_slices_folder = patient_folder / "all_slices"
 
     if all_slices_folder.exists():
-        all_dcm_files = sorted(list(all_slices_folder.glob("*.dcm")))
+        all_dcm_files = sorted(all_slices_folder.glob("*.dcm"))
     else:
-        all_dcm_files = sorted(list(patient_folder.glob("*.dcm")))
+        all_dcm_files = sorted(patient_folder.glob("*.dcm"))
 
+    # Kesit listesi boşsa veya indeks geçersizse
     if all_dcm_files:
-        # Hasta değiştiğinde slice index sınır aşımını önle
-        if st.session_state.all_slice_index >= len(all_dcm_files):
-            st.session_state.all_slice_index = 0
+        st.session_state.all_slice_index = min(
+            st.session_state.all_slice_index,
+            len(all_dcm_files) - 1
+        )
 
-        st.info(f"📂 **{selected_patient}** için toplam **{len(all_dcm_files)}** kesit mevcut.")
+        st.info(
+            f"📂 {selected_patient} — "
+            f"Toplam {len(all_dcm_files)} kesit"
+        )
 
-        # Slider yerine kullanışlı İleri / Geri Butonları
-        b_col1, b_col_info, b_col2 = st.columns([1, 2, 1])
-        
-        with b_col1:
-            if st.button("⬅️ Önceki Kesit", use_container_width=True, key="prev_slice_btn"):
-                if st.session_state.all_slice_index > 0:
-                    st.session_state.all_slice_index -= 1
-                    st.rerun()
+        # Seçili kesit için büyük görünüm
+        selected_idx = st.session_state.all_slice_index
+        selected_dcm = all_dcm_files[selected_idx]
+        selected_img = dcm_to_image(selected_dcm)
 
-        with b_col2:
-            if st.button("Sonraki Kesit ➡️", use_container_width=True, key="next_slice_btn"):
-                if st.session_state.all_slice_index < len(all_dcm_files) - 1:
-                    st.session_state.all_slice_index += 1
-                    st.rerun()
+        st.markdown("#### 🔎 Seçili Kesit")
 
-        current_dcm = all_dcm_files[st.session_state.all_slice_index]
-        pil_all_img = dcm_to_image(current_dcm)
+        if selected_img is not None:
+            st.image(
+                selected_img,
+                caption=(
+                    f"{selected_dcm.name} — "
+                    f"Kesit {selected_idx + 1}/{len(all_dcm_files)}"
+                ),
+                width=650
+            )
 
-        if pil_all_img:
-            col_img1, col_img_mid, col_img2 = st.columns([1, 2, 1])
-            with col_img_mid:
-                st.image(
-                    pil_all_img, 
-                    caption=f"Dosya: {current_dcm.name} (Kesit: {st.session_state.all_slice_index + 1} / {len(all_dcm_files)})", 
-                    use_container_width=True
+        # Önceki / sonraki kesit gezinmesi
+        prev_col, info_col, next_col = st.columns([1, 2, 1])
+
+        with prev_col:
+            st.button(
+                "⬅️ Önceki Kesit",
+                key="all_prev_slice",
+                use_container_width=True,
+                disabled=(selected_idx == 0),
+                on_click=lambda: setattr(
+                    st.session_state,
+                    "all_slice_index",
+                    st.session_state.all_slice_index - 1
                 )
-        else:
-            st.error("Bu kesit görselleştirilemedi.")
+            )
+
+        with info_col:
+            st.markdown(
+                f"<div style='text-align:center; padding-top:8px'>"
+                f"Kesit {selected_idx + 1} / {len(all_dcm_files)}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        with next_col:
+            st.button(
+                "Sonraki Kesit ➡️",
+                key="all_next_slice",
+                use_container_width=True,
+                disabled=(selected_idx == len(all_dcm_files) - 1),
+                on_click=lambda: setattr(
+                    st.session_state,
+                    "all_slice_index",
+                    st.session_state.all_slice_index + 1
+                )
+            )
+
+        st.markdown("---")
+        st.markdown("#### 🗂️ Tüm Kesitler")
+        st.caption(
+            "Bir kesitin altındaki büyütme düğmesine basarak "
+            "onu üstteki büyük görüntüleme alanında açabilirsiniz."
+        )
+
+        # Dört sütunlu kesit ızgarası
+        grid_cols = st.columns(4)
+
+        for idx, dcm_file in enumerate(all_dcm_files):
+            with grid_cols[idx % 4]:
+                img = dcm_to_image(dcm_file)
+
+                if img is not None:
+                    st.image(img, use_container_width=True)
+
+                    st.caption(f"Kesit {idx + 1}")
+
+                    st.button(
+                        "🔍 Büyüt",
+                        key=f"zoom_slice_{selected_patient}_{idx}",
+                        use_container_width=True,
+                        type=(
+                            "primary"
+                            if idx == st.session_state.all_slice_index
+                            else "secondary"
+                        ),
+                        on_click=lambda i=idx: setattr(
+                            st.session_state, "all_slice_index", i
+                        )
+                    )
+                else:
+                    st.error(f"Kesit {idx + 1} okunamadı.")
+
     else:
-        st.warning(f"⚠️ `{selected_patient}` için `all_slices` klasöründe DICOM dosyası bulunamadı.")
+        st.warning(
+            f"{selected_patient} için all_slices klasöründe "
+            "DICOM dosyası bulunamadı."
+        )
