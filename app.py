@@ -36,7 +36,7 @@ def download_and_extract_data():
         # Tüm kesitleri içeren güncel zip dosyasını indir
         zip_path = hf_hub_download(
             repo_id=HF_REPO_ID,
-            filename="cq500_dual_slices.zip",
+            filename="all_slices_complete.zip",
             repo_type="dataset",
             token=HF_TOKEN
         )
