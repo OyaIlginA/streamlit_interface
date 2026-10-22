@@ -17,7 +17,7 @@ st.title("🧠 TBI / CQ500 Kesit İnceleme ve Etiketleme Paneli")
 # ── HUGGING FACE VE DOSYA AYARLARI ────────────────────────────────
 HF_REPO_ID = "oyailgin/CQ500_export300"
 HF_TOKEN = st.secrets.get("HF_TOKEN", "token")
-ZIP_FILENAME = "cq500_dual_slices.zip" # Burayı kendi yeni zip dosya adınla değiştirebilirsin
+ZIP_FILENAME = "cq500_dual_slices.zip" 
 
 LOCAL_DATA_DIR = Path("extracted_data")
 ANNOTATION_FILE = "doctor_annotations.csv"
@@ -78,7 +78,6 @@ def dcm_to_image(dcm_path):
 # Klasör yapısını bulma (İkili yapıya uyumlu arama)
 slices_root = LOCAL_DATA_DIR / "selected_slices"
 if not slices_root.exists():
-    # Eğer doğrudan hasta klasörleri ana dizindeyse veya başka bir alt klasördeyse bul
     sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
     for d in sub_dirs:
         if (d / "ssa_slices").exists() or (d / "all_slices").exists():
@@ -87,31 +86,16 @@ if not slices_root.exists():
     if not slices_root.exists() and sub_dirs:
         slices_root = sub_dirs[0]
 
-# Hasta listesini dinamik olarak çıkar
-if LOCAL_DATA_DIR.exists():
-    patients = sorted([p.name for p in LOCAL_DATA_DIR.iterdir() if p.is_dir() and p.name != "__MACOSX"])
-    # Eğer iç içe klasör yapısı varsa düzelt
-    if len(patients) == 1 and (LOCAL_DATA_DIR / patients[0]).is_dir():
-        inner_path = LOCAL_DATA_DIR / patients[0]
-        # Eğer içerde hasta klasörleri varsa
-        sub_pats = sorted([p.name for p in inner_path.iterdir() if p.is_dir()])
-        if any("CQ500" in p for p in sub_pats):
-            LOCAL_DATA_DIR = inner_path
-            patients = sub_pats
-else:
-    patients = []
-
-# Güvenli hasta listesi filtrelemesi (Sadece CQ500 ile başlayanlar veya geçerli klasörler)
+# Güvenli hasta listesi filtrelemesi
 patients = sorted([p for p in os.listdir(LOCAL_DATA_DIR) if os.path.isdir(LOCAL_DATA_DIR / p) and p != "__MACOSX"])
 
 if not patients:
     st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya yapısını kontrol edin.")
 else:
-     # ── 1. HASTA GEZİNME ──
+    # ── 1. HASTA GEZİNME ──
     if "patient_index" not in st.session_state:
         st.session_state.patient_index = 0
 
-    # Hasta listesi değişmişse indeksi geçerli tut
     st.session_state.patient_index = min(
         st.session_state.patient_index, len(patients) - 1
     )
@@ -150,7 +134,6 @@ else:
         key="next_patient_btn"
     )
 
-    # Hasta seçimi ve gezinme indeksi aynı kaynağı kullanır
     st.session_state.selected_patient_selectbox = patients[
         st.session_state.patient_index
     ]
@@ -163,7 +146,6 @@ else:
     )
 
     selected_patient = patients[st.session_state.patient_index]
-
 
     doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
 
@@ -210,8 +192,8 @@ else:
 
         st.markdown("---")
 
-        # ── MIDLINE SHIFT İÇİN NOKTA İŞARETLEME (3 NOKTA) ────────
-        st.markdown("📍 **Midline Shift İşaretleme (3 nokta seçin)**")
+        # ── MIDLINE SHIFT İÇİN NOKTA İŞARETLEME (3 NOKTA + DİNAMİK REHBER) ────────
+        st.markdown("📍 **Midline Shift İşaretleme (Model Eğitimi İçin 3 Anatomik Nokta)**")
 
         slice_names = [f"Kesit {i + 1}" for i in range(len(dcm_files))]
         selected_slice_idx = st.selectbox(
@@ -223,30 +205,43 @@ else:
         if points_key not in st.session_state:
             st.session_state[points_key] = []
 
+        points = st.session_state[points_key]
+
+        # Doktorlar için adım adım rehber bilgilendirme metni
+        if len(points) == 0:
+            st.info("👉 **1. Adım:** Lütfen beyin orta hattının **Ön (Anterior) Noktasını (Falx Ant)** işaretleyin.")
+        elif len(points) == 1:
+            st.info("👉 **2. Adım:** Lütfen beyin orta hattının **Arka (Posterior) Noktasını (Falx Post)** işaretleyin.")
+        elif len(points) == 2:
+            st.info("👉 **3. Adım:** Lütfen orta hattan sapmış olan **Kaymış Yapıyı (Shift Point)** işaretleyin.")
+        else:
+            st.success("✅ 3 nokta başarıyla tamamlandı! Aşağıdan formu doldurup kaydedebilirsiniz.")
+
         mark_img = dcm_to_image(dcm_files[selected_slice_idx])
 
         if mark_img:
             mark_img_rgb = mark_img.convert("RGB")
             draw_arr = np.array(mark_img_rgb)
 
-            for (px, py) in st.session_state[points_key]:
-                y0, y1 = max(0, py - 3), min(draw_arr.shape[0], py + 3)
-                x0, x1 = max(0, px - 3), min(draw_arr.shape[1], px + 3)
-                draw_arr[y0:y1, x0:x1] = [255, 0, 0]
+            # İşaretlenen noktaları farklı renklerle gösterelim (Kırmızı, Yeşil, Mavi)
+            colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]]
+            for idx, (px, py) in enumerate(points):
+                y0, y1 = max(0, py - 4), min(draw_arr.shape[0], py + 4)
+                x0, x1 = max(0, px - 4), min(draw_arr.shape[1], px + 4)
+                draw_arr[y0:y1, x0:x1] = colors[idx % 3]
 
             display_img = Image.fromarray(draw_arr)
             coords = streamlit_image_coordinates(display_img, key=f"click_{points_key}")
 
             if coords is not None:
                 new_point = (coords["x"], coords["y"])
-                if not st.session_state[points_key] or st.session_state[points_key][-1] != new_point:
-                    if len(st.session_state[points_key]) >= 3:
-                        st.session_state[points_key] = []
-                    st.session_state[points_key].append(new_point)
-                    st.rerun()
+                if not points or points[-1] != new_point:
+                    if len(points) < 3:
+                        points.append(new_point)
+                        st.rerun()
 
-            st.caption(f"İşaretlenen nokta sayısı: {len(st.session_state[points_key])}/3")
-            if st.button("🔄 Noktaları Temizle"):
+            st.caption(f"İşaretlenen nokta sayısı: {len(points)}/3")
+            if st.button("🔄 Tüm Noktaları Temizle"):
                 st.session_state[points_key] = []
                 st.rerun()
 
@@ -256,11 +251,10 @@ else:
         with st.form("annotation_form"):
             st.subheader("📋 Klinik Değerlendirme Formu")
 
-            points = st.session_state.get(points_key, [])
             if len(points) == 3:
-                st.success(f"Noktalar: {points[0]} , {points[1]} , {points[2]}")
+                st.success(f"✅ Hazır Noktalar -> 1.Falx Ant: {points[0]} | 2.Falx Post: {points[1]} | 3.Kaymış Yapı: {points[2]}")
             else:
-                st.warning("⚠️ Kaydetmeden önce yukarıda tam olarak 3 nokta işaretlemelisiniz.")
+                st.warning("⚠️ Kaydetmeden önce yukarıda sırasıyla tam olarak 3 nokta işaretlemelisiniz.")
 
             basal_status = st.selectbox(
                 "Bazal Sistern Durumu",
@@ -272,16 +266,20 @@ else:
 
             if submitted:
                 if len(points) != 3:
-                    st.error("Kaydetmeden önce tam olarak 3 nokta işaretlemelisiniz.")
+                    st.error("Kaydetmeden önce sırasıyla tam 3 nokta işaretlemelisiniz.")
                     st.stop()
 
+                # Model eğitimi için anlamlı ve düzenli sütun adları
                 new_record = {
                     "doctor_name": doctor_name,
                     "patient_id": selected_patient,
                     "slice_idx": selected_slice_idx,
-                    "point1_x": points[0][0], "point1_y": points[0][1],
-                    "point2_x": points[1][0], "point2_y": points[1][1],
-                    "point3_x": points[2][0], "point3_y": points[2][1],
+                    "falx_ant_x": points[0][0],
+                    "falx_ant_y": points[0][1],
+                    "falx_post_x": points[1][0],
+                    "falx_post_y": points[1][1],
+                    "shift_point_x": points[2][0],
+                    "shift_point_y": points[2][1],
                     "basal_status": basal_status,
                     "notes": notes,
                     "timestamp": str(pd.Timestamp.now())
@@ -324,9 +322,9 @@ else:
                         path_in_repo=ANNOTATION_FILE,
                         repo_id=HF_REPO_ID,
                         repo_type="dataset",
-                        commit_message=f"Doktor notu eklendi: {selected_patient}"
+                        commit_message=f"Doktor notu ve anatomik noktalar eklendi: {selected_patient}"
                     )
-                    st.success(f"✅ {selected_patient} için orijinal verilerle birleştirilen kayıt başarıyla HF'ye yüklendi!")
+                    st.success(f"✅ {selected_patient} için anatomik noktalar ve veriler başarıyla HF'ye yüklendi!")
                     st.session_state[points_key] = []
                 except Exception as e:
                     st.error(f"Kayıt yapıldı ancak HF'ye yüklenirken hata oluştu: {e}")
@@ -350,7 +348,6 @@ if patients:
     else:
         all_dcm_files = sorted(patient_folder.glob("*.dcm"))
 
-    # Kesit listesi boşsa veya indeks geçersizse
     if all_dcm_files:
         st.session_state.all_slice_index = min(
             st.session_state.all_slice_index,
@@ -362,7 +359,6 @@ if patients:
             f"Toplam {len(all_dcm_files)} kesit"
         )
 
-        # Seçili kesit için büyük görünüm
         selected_idx = st.session_state.all_slice_index
         selected_dcm = all_dcm_files[selected_idx]
         selected_img = dcm_to_image(selected_dcm)
@@ -379,7 +375,6 @@ if patients:
                 width=650
             )
 
-        # Önceki / sonraki kesit gezinmesi
         prev_col, info_col, next_col = st.columns([1, 2, 1])
 
         with prev_col:
@@ -423,7 +418,6 @@ if patients:
             "onu üstteki büyük görüntüleme alanında açabilirsiniz."
         )
 
-        # Dört sütunlu kesit ızgarası
         grid_cols = st.columns(4)
 
         for idx, dcm_file in enumerate(all_dcm_files):
