@@ -67,7 +67,8 @@ POINT_HEX = ["#ef4444", "#22c55e", "#3b82f6"]
 CORE_COLS = [
     "doctor_name", "patient_id", "slice_source", "slice_file", "slice_idx",
     "falx_ant_x", "falx_ant_y", "falx_post_x", "falx_post_y",
-    "shift_point_x", "shift_point_y", "basal_status", "notes", "timestamp",
+    "shift_point_x", "shift_point_y", "midline_shift_status",
+    "basal_status", "notes", "timestamp",
 ]
 
 # ══════════════════════════════════════════════════════════════════
@@ -312,7 +313,13 @@ def step_slice(delta: int, n: int):
 def open_slice(slice_no: int):
     st.session_state.source = "all"
     st.session_state.slice_no = slice_no
-    st.toast(f"Kesit {slice_no} → «İşaretleme» sekmesinde açıldı")
+    st.session_state.active_view = "🎯 İşaretleme"
+    st.toast(f"Kesit {slice_no} seçildi; büyük görüntüde açıldı")
+
+
+def set_shift_status(status_key: str, pts_key: str):
+    if st.session_state.get(status_key) == "Yok":
+        st.session_state[pts_key] = []
 
 
 def undo_point(key: str):
@@ -326,12 +333,15 @@ def clear_points(key: str):
 
 def save_annotation(ctx: dict):
     pts = st.session_state.get(ctx["pts_key"], [])
+    shift_status = st.session_state.get(ctx["shift_key"], "Var")
     doctor = ctx["doctor"].strip()
-    if len(pts) != 3 or not doctor:
-        st.session_state.flash = ("error", "3 nokta ve doktor adı gerekli.")
+    if (shift_status == "Var" and len(pts) != 3) or not doctor:
+        st.session_state.flash = ("error", "Midline shift 'Var' ise 3 nokta ve doktor adı gerekli.")
         return
 
-    m = shift_metrics(pts, ctx["spacing"])
+    # Shift yoksa koordinat ve ölçüm alanları boş kaydedilir.
+    saved_pts = pts if shift_status == "Var" else []
+    m = shift_metrics(saved_pts, ctx["spacing"]) if len(saved_pts) == 3 else None
     record = {
         "doctor_name": doctor,
         "patient_id": ctx["patient"],
@@ -341,9 +351,13 @@ def save_annotation(ctx: dict):
         "img_w": ctx["img_w"],
         "img_h": ctx["img_h"],
         "pixel_spacing_mm": ctx["spacing"],
-        "falx_ant_x": pts[0][0], "falx_ant_y": pts[0][1],
-        "falx_post_x": pts[1][0], "falx_post_y": pts[1][1],
-        "shift_point_x": pts[2][0], "shift_point_y": pts[2][1],
+        "midline_shift_status": shift_status,
+        "falx_ant_x": saved_pts[0][0] if len(saved_pts) == 3 else None,
+        "falx_ant_y": saved_pts[0][1] if len(saved_pts) == 3 else None,
+        "falx_post_x": saved_pts[1][0] if len(saved_pts) == 3 else None,
+        "falx_post_y": saved_pts[1][1] if len(saved_pts) == 3 else None,
+        "shift_point_x": saved_pts[2][0] if len(saved_pts) == 3 else None,
+        "shift_point_y": saved_pts[2][1] if len(saved_pts) == 3 else None,
         "midline_shift_px": round(m["px"], 2) if m else None,
         "midline_shift_mm": round(m["mm"], 2) if m and m["mm"] is not None else None,
         "basal_status": st.session_state[ctx["basal_key"]],
@@ -486,6 +500,11 @@ def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_
     if basal_key not in st.session_state:
         b = str(existing["basal_status"]) if existing is not None else BASAL_OPTIONS[0]
         st.session_state[basal_key] = b if b in BASAL_OPTIONS else BASAL_OPTIONS[0]
+    shift_key = f"shift_status::{state_key}"
+    if shift_key not in st.session_state:
+        old_status = str(existing.get("midline_shift_status", "")) if existing is not None else ""
+        # Eski CSV kayıtlarıyla uyumluluk: eski kayıtta noktalar varsa Var kabul edilir.
+        st.session_state[shift_key] = old_status if old_status in ("Var", "Yok") else "Var"
     if notes_key not in st.session_state:
         nt = existing["notes"] if existing is not None else ""
         st.session_state[notes_key] = "" if pd.isna(nt) else str(nt)
@@ -505,7 +524,7 @@ def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_
             last_key = f"lastclick::{state_key}"
             if coords.get("unix_time") != st.session_state.get(last_key):
                 st.session_state[last_key] = coords.get("unix_time")
-                if len(pts) < 3:
+                if len(pts) < 3 and st.session_state[shift_key] == "Var":
                     factor = img_w / (coords.get("width") or disp_img.width)
                     pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
                     st.rerun()
@@ -537,22 +556,26 @@ def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_
 
         with st.container(border=True):
             st.markdown("**📋 Klinik Değerlendirme**")
+            st.radio("Midline shift", ["Var", "Yok"], key=shift_key,
+                     horizontal=True, on_change=set_shift_status, args=(shift_key, pts_key))
             st.radio("Bazal sistern durumu", BASAL_OPTIONS, key=basal_key)
             st.text_area("Klinik notlar", key=notes_key, height=110,
                          placeholder="Gözlem, şüphe, yorum…")
 
             ctx = dict(
-                pts_key=pts_key, basal_key=basal_key, notes_key=notes_key, doctor=doctor,
+                pts_key=pts_key, shift_key=shift_key, basal_key=basal_key, notes_key=notes_key, doctor=doctor,
                 patient=patient, source=source, fname=fname, idx=idx, n=n,
                 img_w=img_w, img_h=img_h, spacing=spacing, advance=advance,
             )
             st.button(
                 "💾 Kaydet" + (" ve sonraki kesite geç" if advance else ""),
                 type="primary", use_container_width=True,
-                disabled=len(pts) != 3 or not doctor.strip(),
+                disabled=(st.session_state[shift_key] == "Var" and len(pts) != 3) or not doctor.strip(),
                 on_click=save_annotation, args=(ctx,),
             )
-            if len(pts) != 3:
+            if st.session_state[shift_key] == "Yok":
+                st.caption("Midline shift 'Yok' olarak nokta işaretlemeden kaydedilebilir.")
+            elif len(pts) != 3:
                 st.caption(f"Kaydetmek için {3 - len(pts)} nokta daha işaretleyin.")
             elif not doctor.strip():
                 st.caption("Kenar çubuğuna doktor adını girin.")
@@ -583,12 +606,21 @@ def render_grid_tab(patient, doctor, df_ann, win, files):
             with st.container(border=True):
                 img = thumbnail(f, *win)
                 if img is not None:
-                    st.image(img, use_container_width=True)
+                    # Küçük kesit görüntüsünün kendisine tıklamak da yakınlaştırmayı açar.
+                    grid_coords = streamlit_image_coordinates(
+                        img, key=f"grid_click::{patient}::{Path(f).name}"
+                    )
+                    if grid_coords is not None:
+                        grid_last_key = f"grid_lastclick::{patient}::{Path(f).name}"
+                        if grid_coords.get("unix_time") != st.session_state.get(grid_last_key):
+                            st.session_state[grid_last_key] = grid_coords.get("unix_time")
+                            open_slice(gi + 1)
+                            st.rerun()
                 else:
                     st.error("Okunamadı")
                 mark = " ✓" if Path(f).name in done_files else ""
                 st.caption(f"Kesit {gi + 1}{mark}")
-                st.button("İşaretle", key=f"open::{patient}::{gi}", use_container_width=True,
+                st.button("🔎 Yakınlaştır ve işaretle", key=f"open::{patient}::{gi}", use_container_width=True,
                           on_click=open_slice, args=(gi + 1,))
 
 
@@ -687,10 +719,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_mark, tab_grid, tab_hist = st.tabs(["🎯 İşaretleme", "🩻 Tüm Kesitler", "📜 Kayıtlar"])
-with tab_mark:
+# Radio tab'ları kullanıyoruz; böylece ızgaradan seçilen kesit otomatik olarak
+# büyük görüntü/işaretleme görünümüne geçebilir. İçerik akışları korunur.
+views = ["🎯 İşaretleme", "🩻 Tüm Kesitler", "📜 Kayıtlar"]
+if "active_view" not in st.session_state:
+    st.session_state.active_view = views[0]
+st.radio("Görünüm", views, key="active_view", horizontal=True, label_visibility="collapsed")
+
+if st.session_state.active_view == views[0]:
     render_marking_tab(root, patient, doctor, df_ann, (wc, ww), disp_w, advance, ssa_n, all_n)
-with tab_grid:
+elif st.session_state.active_view == views[1]:
     render_grid_tab(patient, doctor, df_ann, (wc, ww), all_files if all_files else ssa_files)
-with tab_hist:
+else:
     render_history_tab(patient, df_ann)
