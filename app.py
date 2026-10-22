@@ -1,6 +1,7 @@
 """
 TBI / CQ500 — Doktor Etiketleme Paneli
-Midline shift için 3 anatomik nokta (Falx Ant, Falx Post, Kayan Yapı) + bazal sistern durumu.
+Kesit başına: Midline shift (var/yok) + 3 anatomik nokta (yalnızca "Var" ise) + Bazal sistern durumu.
+Akış: Izgara görünümü → kesiti büyüt → işaretle → kaydet.
 """
 from __future__ import annotations
 
@@ -54,6 +55,8 @@ WINDOW_PRESETS = {
     "Özel": None,
 }
 
+MIDLINE_OPTIONS = ["Yok (0)", "Var (1)"]
+MIDLINE_NO, MIDLINE_YES = MIDLINE_OPTIONS
 BASAL_OPTIONS = ["Normal (0)", "Sıkışmış / Compressed (1)", "Yok / Absent (2)"]
 
 STEPS = [
@@ -66,9 +69,9 @@ POINT_HEX = ["#ef4444", "#22c55e", "#3b82f6"]
 
 CORE_COLS = [
     "doctor_name", "patient_id", "slice_source", "slice_file", "slice_idx",
+    "midline_shift_status",
     "falx_ant_x", "falx_ant_y", "falx_post_x", "falx_post_y",
-    "shift_point_x", "shift_point_y", "midline_shift_status",
-    "basal_status", "notes", "timestamp",
+    "shift_point_x", "shift_point_y", "basal_status", "notes", "timestamp",
 ]
 
 # ══════════════════════════════════════════════════════════════════
@@ -95,6 +98,7 @@ st.markdown(
 }
 .chip.ok  {background: rgba(34,197,94,.15);  border-color: rgba(34,197,94,.5);}
 .chip.warn{background: rgba(234,179,8,.15);  border-color: rgba(234,179,8,.5);}
+.chip.red {background: rgba(239,68,68,.15);  border-color: rgba(239,68,68,.5);}
 
 .step {
     display: flex; gap: .75rem; align-items: center; padding: .55rem .75rem;
@@ -137,23 +141,18 @@ def ensure_data() -> str | None:
         return str(e)
 
 
-def pull_annotations_latest() -> bool:
-    """Her Streamlit çalıştırmasında Hub'daki güncel CSV'yi indirmeyi dener.
-
-    Hub erişilemiyorsa mevcut yerel CSV korunur; uygulama çevrimdışı da açılabilir.
-    """
+@st.cache_resource(show_spinner=False)
+def pull_annotations_once() -> None:
+    """Uygulama ilk açıldığında Hub'daki güncel annotation dosyasını getirir."""
+    if ANNOTATION_PATH.exists():
+        return
     try:
         hf_hub_download(
-            repo_id=HF_REPO_ID,
-            filename=ANNOTATION_FILE,
-            repo_type="dataset",
-            token=HF_TOKEN,
-            local_dir=".",
-            force_download=True,
+            repo_id=HF_REPO_ID, filename=ANNOTATION_FILE, repo_type="dataset",
+            token=HF_TOKEN, local_dir=".",
         )
-        return True
-    except Exception:  # noqa: BLE001 — dosya henüz yok veya Hub erişilemiyor olabilir
-        return False
+    except Exception:  # noqa: BLE001  (dosya henüz yok olabilir)
+        pass
 
 
 def _has_dicom(d: Path) -> bool:
@@ -226,7 +225,7 @@ def apply_window(arr: np.ndarray, center: float, width: float) -> Image.Image:
 
 
 @st.cache_data(max_entries=600, show_spinner=False)
-def thumbnail(path: str, center: float, width: float, size: int = 320) -> Image.Image | None:
+def thumbnail(path: str, center: float, width: float, size: int = 360) -> Image.Image | None:
     try:
         arr, _ = load_slice(path)
         img = apply_window(arr, center, width)
@@ -264,6 +263,13 @@ def find_existing(df: pd.DataFrame, doctor: str, patient: str, source: str, fnam
     return df[m].iloc[0] if m.any() else None
 
 
+def choice_from_row(row, col: str, options: list[str]) -> str | None:
+    if row is None:
+        return None
+    v = row[col]
+    return v if isinstance(v, str) and v in options else None
+
+
 def points_from_row(row) -> list[tuple[float, float]]:
     try:
         keys = [("falx_ant_x", "falx_ant_y"), ("falx_post_x", "falx_post_y"),
@@ -291,7 +297,9 @@ def shift_metrics(pts, spacing):
 # CALLBACK'LER
 # ══════════════════════════════════════════════════════════════════
 def reset_slice():
-    st.session_state.slice_no = 1
+    """Hasta / kaynak değişince ızgaraya dön."""
+    st.session_state.cur_slice = 1
+    st.session_state.detail_open = False
 
 
 def go_patient(patients: list[str], delta: int):
@@ -311,20 +319,22 @@ def go_next_pending(patients: list[str], done: set[str]):
     st.toast("🎉 Tüm hastalar için en az bir kayıt var.")
 
 
-def step_slice(delta: int, n: int):
-    st.session_state.slice_no = min(max(st.session_state.slice_no + delta, 1), n)
-
-
 def open_slice(slice_no: int):
-    st.session_state.source = "all"
-    st.session_state.slice_no = slice_no
-    st.session_state.active_view = "🎯 İşaretleme"
-    st.toast(f"Kesit {slice_no} seçildi; büyük görüntüde açıldı")
+    st.session_state.cur_slice = slice_no
+    st.session_state.detail_open = True
 
 
-def set_shift_status(status_key: str, pts_key: str):
-    if st.session_state.get(status_key) == "Yok":
-        st.session_state[pts_key] = []
+def close_detail(page_key: str, per_page: int):
+    st.session_state.detail_open = False
+    st.session_state[page_key] = (st.session_state.cur_slice - 1) // per_page + 1
+
+
+def step_slice(delta: int, n: int):
+    st.session_state.cur_slice = min(max(st.session_state.cur_slice + delta, 1), n)
+
+
+def sync_slider():
+    st.session_state.cur_slice = st.session_state.slice_slider
 
 
 def undo_point(key: str):
@@ -338,15 +348,16 @@ def clear_points(key: str):
 
 def save_annotation(ctx: dict):
     pts = st.session_state.get(ctx["pts_key"], [])
-    shift_status = st.session_state.get(ctx["shift_key"], "Var")
     doctor = ctx["doctor"].strip()
-    if (shift_status == "Var" and len(pts) != 3) or not doctor:
-        st.session_state.flash = ("error", "Midline shift 'Var' ise 3 nokta ve doktor adı gerekli.")
+    midline = st.session_state.get(ctx["midline_key"])
+    basal = st.session_state.get(ctx["basal_key"])
+    has_shift = midline == MIDLINE_YES
+
+    if not doctor or midline is None or basal is None or (has_shift and len(pts) != 3):
+        st.session_state.flash = ("error", "Zorunlu alanlar eksik.")
         return
 
-    # Shift yoksa koordinat ve ölçüm alanları boş kaydedilir.
-    saved_pts = pts if shift_status == "Var" else []
-    m = shift_metrics(saved_pts, ctx["spacing"]) if len(saved_pts) == 3 else None
+    m = shift_metrics(pts, ctx["spacing"]) if has_shift else None
     record = {
         "doctor_name": doctor,
         "patient_id": ctx["patient"],
@@ -356,16 +367,17 @@ def save_annotation(ctx: dict):
         "img_w": ctx["img_w"],
         "img_h": ctx["img_h"],
         "pixel_spacing_mm": ctx["spacing"],
-        "midline_shift_status": shift_status,
-        "falx_ant_x": saved_pts[0][0] if len(saved_pts) == 3 else None,
-        "falx_ant_y": saved_pts[0][1] if len(saved_pts) == 3 else None,
-        "falx_post_x": saved_pts[1][0] if len(saved_pts) == 3 else None,
-        "falx_post_y": saved_pts[1][1] if len(saved_pts) == 3 else None,
-        "shift_point_x": saved_pts[2][0] if len(saved_pts) == 3 else None,
-        "shift_point_y": saved_pts[2][1] if len(saved_pts) == 3 else None,
+        "midline_shift_status": midline,
+        # Midline "Yok" ise nokta alanları bilinçli olarak boş bırakılır
+        "falx_ant_x": pts[0][0] if has_shift else None,
+        "falx_ant_y": pts[0][1] if has_shift else None,
+        "falx_post_x": pts[1][0] if has_shift else None,
+        "falx_post_y": pts[1][1] if has_shift else None,
+        "shift_point_x": pts[2][0] if has_shift else None,
+        "shift_point_y": pts[2][1] if has_shift else None,
         "midline_shift_px": round(m["px"], 2) if m else None,
         "midline_shift_mm": round(m["mm"], 2) if m and m["mm"] is not None else None,
-        "basal_status": st.session_state[ctx["basal_key"]],
+        "basal_status": basal,
         "notes": st.session_state[ctx["notes_key"]],
         "timestamp": str(pd.Timestamp.now()),
     }
@@ -406,8 +418,8 @@ def save_annotation(ctx: dict):
     except Exception as e:  # noqa: BLE001
         st.session_state.flash = ("warning", f"Yerel kayıt yapıldı, Hub'a yüklenemedi: {e}")
 
-    if ctx["advance"] and st.session_state.slice_no < ctx["n"]:
-        st.session_state.slice_no += 1
+    if ctx["advance"] and st.session_state.cur_slice < ctx["n"]:
+        st.session_state.cur_slice += 1
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -445,47 +457,78 @@ def stepper_html(n_pts: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# SEKMELER
+# GÖRÜNÜM 1: IZGARA
 # ══════════════════════════════════════════════════════════════════
-def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_n, all_n):
-    flash = st.session_state.pop("flash", None)
-    if flash:
-        {"success": st.success, "warning": st.warning, "error": st.error}[flash[0]](flash[1])
-
-    # ── kesit kaynağı + gezinme ──
-    options = [s for s, n in (("ssa", ssa_n), ("all", all_n)) if n > 0]
-    if not options:
-        st.warning("Bu hasta için DICOM kesiti bulunamadı.")
-        return
-    if st.session_state.get("source") not in options:
-        st.session_state.source = options[0]
-
-    labels = {"ssa": f"🎯 SSA seçili kesitler ({ssa_n})", "all": f"🩻 Tüm kesitler ({all_n})"}
-    top_l, top_r = st.columns([2, 3])
-    with top_l:
-        source = st.radio(
-            "Kesit kaynağı", options, key="source", horizontal=True,
-            format_func=lambda s: labels[s], on_change=reset_slice,
-            label_visibility="collapsed",
-        )
-    files = list_slices(root, patient, source)
+def render_grid(files, patient, source, doctor, df_ann, win, grid_cols):
     n = len(files)
-    st.session_state.slice_no = min(max(st.session_state.get("slice_no", 1), 1), n)
+    mine = df_ann[
+        (df_ann["doctor_name"].astype(str) == doctor) & (df_ann["patient_id"].astype(str) == patient)
+    ]
+    status = dict(zip(mine["slice_file"].astype(str), mine["midline_shift_status"]))
+    marked = sum(Path(f).name in status for f in files)
 
-    with top_r:
-        b1, mid, b2 = st.columns([1, 6, 1])
-        b1.button("◀", key="prev_slice", use_container_width=True,
-                  disabled=st.session_state.slice_no <= 1, on_click=step_slice, args=(-1, n))
-        if n > 1:
-            mid.slider("Kesit", 1, n, key="slice_no", label_visibility="collapsed")
-        else:
-            mid.caption("Tek kesit")
-        b2.button("▶", key="next_slice", use_container_width=True,
-                  disabled=st.session_state.slice_no >= n, on_click=step_slice, args=(1, n))
+    per_page = grid_cols * 3
+    pages = max(1, math.ceil(n / per_page))
+    page_key = f"grid_page::{patient}::{source}"
 
-    idx = st.session_state.slice_no - 1
+    head_l, head_r = st.columns([4, 1])
+    head_l.markdown(
+        f'<span class="chip">{n} kesit</span>'
+        f'<span class="chip {"ok" if marked == n else "warn"}">{marked}/{n} işaretli</span>'
+        f"&nbsp; <small>Bir kesiti büyütmek ve işaretlemek için <b>🔍 Aç</b> düğmesine basın.</small>",
+        unsafe_allow_html=True,
+    )
+    if pages > 1:
+        page = head_r.number_input("Sayfa", 1, pages, 1, key=page_key)
+    else:
+        page = 1
+
+    start = (page - 1) * per_page
+    cols = st.columns(grid_cols)
+    for i, f in enumerate(files[start:start + per_page]):
+        gi = start + i
+        name = Path(f).name
+        with cols[i % grid_cols]:
+            with st.container(border=True):
+                img = thumbnail(f, *win)
+                if img is not None:
+                    st.image(img, use_container_width=True)
+                else:
+                    st.error("Okunamadı")
+
+                if name in status:
+                    ms = status[name]
+                    tag = "Shift: Var" if ms == MIDLINE_YES else ("Shift: Yok" if ms == MIDLINE_NO else "kayıtlı")
+                    st.caption(f"Kesit {gi + 1} · ✓ {tag}")
+                else:
+                    st.caption(f"Kesit {gi + 1}")
+                st.button("🔍 Aç", key=f"open::{patient}::{source}::{gi}", use_container_width=True,
+                          on_click=open_slice, args=(gi + 1,))
+
+
+# ══════════════════════════════════════════════════════════════════
+# GÖRÜNÜM 2: BÜYÜK KESİT + İŞARETLEME
+# ══════════════════════════════════════════════════════════════════
+def render_detail(files, patient, source, doctor, df_ann, win, disp_w, advance, grid_cols):
+    n = len(files)
+    cur = st.session_state.cur_slice
+    idx = cur - 1
     path = files[idx]
     fname = Path(path).name
+    page_key = f"grid_page::{patient}::{source}"
+
+    # ── üst çubuk: ızgaraya dön + kesit gezinme ──
+    h_back, h_prev, h_mid, h_next = st.columns([2, 1, 7, 1])
+    h_back.button("⬅️ Izgaraya dön", use_container_width=True,
+                  on_click=close_detail, args=(page_key, grid_cols * 3))
+    h_prev.button("◀", key="prev_slice", use_container_width=True, disabled=cur <= 1,
+                  on_click=step_slice, args=(-1, n))
+    if n > 1:
+        st.session_state.slice_slider = cur
+        h_mid.slider("Kesit", 1, n, key="slice_slider", on_change=sync_slider,
+                     label_visibility="collapsed")
+    h_next.button("▶", key="next_slice", use_container_width=True, disabled=cur >= n,
+                  on_click=step_slice, args=(1, n))
 
     try:
         arr, spacing = load_slice(path)
@@ -495,138 +538,134 @@ def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_
     base_img = apply_window(arr, *win)
     img_w, img_h = base_img.size
 
-    # ── nokta durumu (kesit başına) ──
+    # ── kesit başına durum ──
     state_key = f"{patient}::{source}::{fname}"
-    pts_key, basal_key, notes_key = f"pts::{state_key}", f"basal::{state_key}", f"notes::{state_key}"
+    pts_key = f"pts::{state_key}"
+    midline_key, basal_key, notes_key = (f"midline::{state_key}", f"basal::{state_key}", f"notes::{state_key}")
     existing = find_existing(df_ann, doctor, patient, source, fname)
 
     if pts_key not in st.session_state:
         st.session_state[pts_key] = points_from_row(existing) if existing is not None else []
+    if midline_key not in st.session_state:
+        st.session_state[midline_key] = choice_from_row(existing, "midline_shift_status", MIDLINE_OPTIONS)
     if basal_key not in st.session_state:
-        b = str(existing["basal_status"]) if existing is not None else BASAL_OPTIONS[0]
-        st.session_state[basal_key] = b if b in BASAL_OPTIONS else BASAL_OPTIONS[0]
-    shift_key = f"shift_status::{state_key}"
-    if shift_key not in st.session_state:
-        old_status = str(existing.get("midline_shift_status", "")) if existing is not None else ""
-        # Eski CSV kayıtlarıyla uyumluluk: eski kayıtta noktalar varsa Var kabul edilir.
-        st.session_state[shift_key] = old_status if old_status in ("Var", "Yok") else "Var"
+        st.session_state[basal_key] = choice_from_row(existing, "basal_status", BASAL_OPTIONS)
     if notes_key not in st.session_state:
         nt = existing["notes"] if existing is not None else ""
         st.session_state[notes_key] = "" if pd.isna(nt) else str(nt)
 
     pts: list = st.session_state[pts_key]
-    metrics = shift_metrics(pts, spacing) if len(pts) == 3 else None
+    midline = st.session_state[midline_key]
+    marking_on = midline != MIDLINE_NO          # "Yok" seçiliyse nokta işaretleme kapalı
+    has_shift = midline == MIDLINE_YES
+    metrics = shift_metrics(pts, spacing) if (has_shift and len(pts) == 3) else None
 
     left, right = st.columns([3, 2], gap="large")
 
-    # ── görüntü + tıklama ──
+    # ── büyük görüntü + tıklama ──
     with left:
         scale = disp_w / img_w
-        disp_img = draw_overlay(base_img, pts, scale, metrics)
+        show_pts = pts if marking_on else []
+        disp_img = draw_overlay(base_img, show_pts, scale, metrics)
         coords = streamlit_image_coordinates(disp_img, key=f"click::{state_key}")
 
         if coords is not None:
             last_key = f"lastclick::{state_key}"
             if coords.get("unix_time") != st.session_state.get(last_key):
                 st.session_state[last_key] = coords.get("unix_time")
-                if len(pts) < 3 and st.session_state[shift_key] == "Var":
+                if marking_on and len(pts) < 3:
                     factor = img_w / (coords.get("width") or disp_img.width)
                     pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
                     st.rerun()
 
-        saved_badge = '<span class="chip ok">✓ kayıtlı</span>' if existing is not None else \
-                      '<span class="chip warn">kayıt yok</span>'
+        saved = '<span class="chip ok">✓ kayıtlı</span>' if existing is not None else \
+                '<span class="chip warn">kayıt yok</span>'
         st.markdown(
-            f'<span class="chip">{fname}</span><span class="chip">Kesit {idx + 1}/{n}</span>'
-            f'<span class="chip">{img_w}×{img_h}</span>{saved_badge}',
+            f'<span class="chip">{patient}</span><span class="chip">{fname}</span>'
+            f'<span class="chip">Kesit {cur}/{n}</span><span class="chip">{img_w}×{img_h}</span>{saved}',
             unsafe_allow_html=True,
         )
 
     # ── sağ panel ──
     with right:
         with st.container(border=True):
-            st.markdown("**📍 Midline Shift İşaretleme**")
-            st.markdown(stepper_html(len(pts)), unsafe_allow_html=True)
+            st.markdown("**🧭 Midline Shift Durumu**")
+            st.radio("Midline shift", MIDLINE_OPTIONS, index=None, key=midline_key,
+                     horizontal=True, label_visibility="collapsed")
 
-            c1, c2 = st.columns(2)
-            c1.button("↩️ Geri al", use_container_width=True, disabled=not pts,
-                      on_click=undo_point, args=(pts_key,))
-            c2.button("🗑️ Temizle", use_container_width=True, disabled=not pts,
-                      on_click=clear_points, args=(pts_key,))
-
-            if metrics:
-                val = f"{metrics['mm']:.1f} mm" if metrics["mm"] is not None else f"{metrics['px']:.0f} px"
-                st.metric("Tahmini midline shift", val,
-                          help="Kayan noktanın falx doğrusuna dik uzaklığı (otomatik hesaplanır).")
+            if midline == MIDLINE_NO:
+                st.info("Midline shift yok olarak işaretlendi — nokta işaretlemeye gerek yok.")
+            else:
+                st.markdown(stepper_html(len(pts)), unsafe_allow_html=True)
+                if midline is None:
+                    st.caption("Önce midline shift durumunu seçin. Noktaları şimdiden işaretleyebilirsiniz.")
+                c1, c2 = st.columns(2)
+                c1.button("↩️ Geri al", use_container_width=True, disabled=not pts,
+                          on_click=undo_point, args=(pts_key,))
+                c2.button("🗑️ Temizle", use_container_width=True, disabled=not pts,
+                          on_click=clear_points, args=(pts_key,))
+                if metrics:
+                    val = f"{metrics['mm']:.1f} mm" if metrics["mm"] is not None else f"{metrics['px']:.0f} px"
+                    st.metric("Tahmini midline shift", val,
+                              help="Kayan noktanın falx doğrusuna dik uzaklığı (otomatik hesaplanır).")
 
         with st.container(border=True):
             st.markdown("**📋 Klinik Değerlendirme**")
-            st.radio("Midline shift", ["Var", "Yok"], key=shift_key,
-                     horizontal=True, on_change=set_shift_status, args=(shift_key, pts_key))
-            st.radio("Bazal sistern durumu", BASAL_OPTIONS, key=basal_key)
-            st.text_area("Klinik notlar", key=notes_key, height=110,
-                         placeholder="Gözlem, şüphe, yorum…")
+            st.radio("Bazal sistern durumu", BASAL_OPTIONS, index=None, key=basal_key)
+            st.text_area("Klinik notlar", key=notes_key, height=100, placeholder="Gözlem, şüphe, yorum…")
+
+            missing = []
+            if not doctor.strip():
+                missing.append("doktor adı")
+            if midline is None:
+                missing.append("midline durumu")
+            if has_shift and len(pts) != 3:
+                missing.append(f"{3 - len(pts)} nokta")
+            if st.session_state[basal_key] is None:
+                missing.append("bazal sistern durumu")
 
             ctx = dict(
-                pts_key=pts_key, shift_key=shift_key, basal_key=basal_key, notes_key=notes_key, doctor=doctor,
-                patient=patient, source=source, fname=fname, idx=idx, n=n,
+                pts_key=pts_key, midline_key=midline_key, basal_key=basal_key, notes_key=notes_key,
+                doctor=doctor, patient=patient, source=source, fname=fname, idx=idx, n=n,
                 img_w=img_w, img_h=img_h, spacing=spacing, advance=advance,
             )
             st.button(
                 "💾 Kaydet" + (" ve sonraki kesite geç" if advance else ""),
-                type="primary", use_container_width=True,
-                disabled=(st.session_state[shift_key] == "Var" and len(pts) != 3) or not doctor.strip(),
+                type="primary", use_container_width=True, disabled=bool(missing),
                 on_click=save_annotation, args=(ctx,),
             )
-            if st.session_state[shift_key] == "Yok":
-                st.caption("Midline shift 'Yok' olarak nokta işaretlemeden kaydedilebilir.")
-            elif len(pts) != 3:
-                st.caption(f"Kaydetmek için {3 - len(pts)} nokta daha işaretleyin.")
-            elif not doctor.strip():
-                st.caption("Kenar çubuğuna doktor adını girin.")
+            if missing:
+                st.caption("Eksik: " + ", ".join(missing))
 
 
-def render_grid_tab(patient, doctor, df_ann, win, files):
-    n = len(files)
-    if n == 0:
-        st.warning("Bu hasta için kesit bulunamadı.")
+# ══════════════════════════════════════════════════════════════════
+# SEKMELER
+# ══════════════════════════════════════════════════════════════════
+def render_slices_tab(root, patient, doctor, df_ann, win, disp_w, advance, grid_cols, ssa_n, all_n):
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        {"success": st.success, "warning": st.warning, "error": st.error}[flash[0]](flash[1])
+
+    options = [s for s, n in (("ssa", ssa_n), ("all", all_n)) if n > 0]
+    if not options:
+        st.warning("Bu hasta için DICOM kesiti bulunamadı.")
         return
+    if st.session_state.get("source") not in options:
+        st.session_state.source = options[0]
 
-    done_files = set(
-        df_ann[(df_ann["doctor_name"].astype(str) == doctor)
-               & (df_ann["patient_id"].astype(str) == patient)]["slice_file"].dropna().astype(str)
-    )
+    labels = {"ssa": f"🎯 SSA seçili kesitler ({ssa_n})", "all": f"🩻 Tüm kesitler ({all_n})"}
+    # Her iki görünümde de çizilir (widget durumu kaybolmasın diye)
+    source = st.radio("Kesit kaynağı", options, key="source", horizontal=True,
+                      format_func=lambda s: labels[s], on_change=reset_slice,
+                      label_visibility="collapsed")
 
-    per_page, ncols = 12, 4
-    pages = max(1, math.ceil(n / per_page))
-    head_l, head_r = st.columns([4, 1])
-    head_l.caption(f"{patient} · toplam {n} kesit · ✓ işaretli: {len(done_files & {Path(f).name for f in files})}")
-    page = head_r.number_input("Sayfa", 1, pages, 1, key=f"grid_page::{patient}") if pages > 1 else 1
+    files = list_slices(root, patient, source)
+    st.session_state.cur_slice = min(max(st.session_state.get("cur_slice", 1), 1), len(files))
 
-    chunk = files[(page - 1) * per_page: page * per_page]
-    cols = st.columns(ncols)
-    for i, f in enumerate(chunk):
-        gi = (page - 1) * per_page + i
-        with cols[i % ncols]:
-            with st.container(border=True):
-                img = thumbnail(f, *win)
-                if img is not None:
-                    # Küçük kesit görüntüsünün kendisine tıklamak da yakınlaştırmayı açar.
-                    grid_coords = streamlit_image_coordinates(
-                        img, key=f"grid_click::{patient}::{Path(f).name}"
-                    )
-                    if grid_coords is not None:
-                        grid_last_key = f"grid_lastclick::{patient}::{Path(f).name}"
-                        if grid_coords.get("unix_time") != st.session_state.get(grid_last_key):
-                            st.session_state[grid_last_key] = grid_coords.get("unix_time")
-                            open_slice(gi + 1)
-                            st.rerun()
-                else:
-                    st.error("Okunamadı")
-                mark = " ✓" if Path(f).name in done_files else ""
-                st.caption(f"Kesit {gi + 1}{mark}")
-                st.button("🔎 Yakınlaştır ve işaretle", key=f"open::{patient}::{gi}", use_container_width=True,
-                          on_click=open_slice, args=(gi + 1,))
+    if st.session_state.get("detail_open"):
+        render_detail(files, patient, source, doctor, df_ann, win, disp_w, advance, grid_cols)
+    else:
+        render_grid(files, patient, source, doctor, df_ann, win, grid_cols)
 
 
 def render_history_tab(patient, df_ann):
@@ -635,13 +674,14 @@ def render_history_tab(patient, df_ann):
     if mine.empty:
         st.info("Bu hasta için henüz kayıt yok.")
     else:
-        cols = [c for c in ["doctor_name", "slice_source", "slice_file", "midline_shift_mm",
-                            "midline_shift_px", "basal_status", "notes", "timestamp"] if c in mine.columns]
+        cols = [c for c in ["doctor_name", "slice_source", "slice_file", "midline_shift_status",
+                            "midline_shift_mm", "midline_shift_px", "basal_status", "notes", "timestamp"]
+                if c in mine.columns]
         st.dataframe(mine[cols], use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    c1, c2, c3 = st.columns(3)
     valid = df_ann.dropna(subset=["patient_id"])
+    c1, c2, c3 = st.columns(3)
     c1.metric("Toplam kayıt", len(valid))
     c2.metric("İşaretlenen hasta", valid["patient_id"].nunique())
     c3.metric("Doktor sayısı", valid["doctor_name"].nunique())
@@ -655,7 +695,7 @@ def render_history_tab(patient, df_ann):
 # ══════════════════════════════════════════════════════════════════
 st.markdown(
     '<div class="hero"><h1>🧠 TBI / CQ500 Etiketleme Paneli</h1>'
-    "<p>Midline shift için 3 anatomik nokta · bazal sistern değerlendirmesi · Hugging Face senkronizasyonu</p></div>",
+    "<p>Midline shift (var/yok + 3 nokta) · bazal sistern değerlendirmesi · Hugging Face senkronizasyonu</p></div>",
     unsafe_allow_html=True,
 )
 
@@ -667,9 +707,7 @@ if err:
         st.rerun()
     st.stop()
 
-# Uygulama her yeniden çalıştığında (sayfa yenileme / Streamlit rerun) ortak CSV'yi Hub'dan tazele.
-# Başarısız olursa pull_annotations_latest yerel CSV'yi silmez; mevcut kayıtlar kullanılmaya devam eder.
-hub_annotations_fresh = pull_annotations_latest()
+pull_annotations_once()
 root, patients = discover_patients(str(LOCAL_DATA_DIR))
 if not patients:
     st.warning("Hasta klasörü bulunamadı. HF repo adını ve zip yapısını kontrol edin.")
@@ -681,10 +719,6 @@ with st.sidebar:
     doctor = st.text_input("Doktor adı / ID", value="Dr. Uzman", label_visibility="collapsed")
 
     df_ann = annotations_df()
-    if hub_annotations_fresh:
-        st.caption("☁️ Kayıtlar Hugging Face ile eşitlendi")
-    else:
-        st.caption("⚠️ Hugging Face eşitlenemedi; yerel kayıtlar kullanılıyor")
     my = df_ann[df_ann["doctor_name"].astype(str) == doctor]
     done_patients = set(my["patient_id"].dropna().astype(str))
 
@@ -712,13 +746,13 @@ with st.sidebar:
         ww = st.slider("Window Width", 1, 4000, 80)
     else:
         wc, ww = WINDOW_PRESETS[preset]
-    disp_w = st.slider("Görüntü genişliği (px)", 400, 900, 620, 20)
+    grid_cols = st.slider("Izgara sütun sayısı", 3, 6, 4)
+    disp_w = st.slider("Büyük görünüm genişliği (px)", 450, 1000, 720, 20)
     advance = st.toggle("Kaydedince sonraki kesite geç", value=True)
 
 patient = st.session_state.patient
 ssa_files = list_slices(root, patient, "ssa")
 all_files = list_slices(root, patient, "all")
-# Her iki klasör de yoksa list_slices aynı yedek klasörü döndürür; tekrarı önle
 ssa_n = len(ssa_files)
 all_n = len(all_files) if all_files != ssa_files or Path(root, patient, "all_slices").exists() else 0
 
@@ -730,16 +764,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Radio tab'ları kullanıyoruz; böylece ızgaradan seçilen kesit otomatik olarak
-# büyük görüntü/işaretleme görünümüne geçebilir. İçerik akışları korunur.
-views = ["🎯 İşaretleme", "🩻 Tüm Kesitler", "📜 Kayıtlar"]
-if "active_view" not in st.session_state:
-    st.session_state.active_view = views[0]
-st.radio("Görünüm", views, key="active_view", horizontal=True, label_visibility="collapsed")
-
-if st.session_state.active_view == views[0]:
-    render_marking_tab(root, patient, doctor, df_ann, (wc, ww), disp_w, advance, ssa_n, all_n)
-elif st.session_state.active_view == views[1]:
-    render_grid_tab(patient, doctor, df_ann, (wc, ww), all_files if all_files else ssa_files)
-else:
+tab_slices, tab_hist = st.tabs(["🩻 Kesitler", "📜 Kayıtlar"])
+with tab_slices:
+    render_slices_tab(root, patient, doctor, df_ann, (wc, ww), disp_w, advance, grid_cols, ssa_n, all_n)
+with tab_hist:
     render_history_tab(patient, df_ann)
