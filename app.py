@@ -1,452 +1,696 @@
-import streamlit as st
-import pandas as pd
-from pathlib import Path
-import pydicom
-import traceback
-import numpy as np
-from PIL import Image
+"""
+TBI / CQ500 — Doktor Etiketleme Paneli
+Midline shift için 3 anatomik nokta (Falx Ant, Falx Post, Kayan Yapı) + bazal sistern durumu.
+"""
+from __future__ import annotations
+
+import math
 import os
+import re
 import zipfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pydicom
+import streamlit as st
 from huggingface_hub import HfApi, hf_hub_download
+from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-st.set_page_config(page_title="TBI Doktor Etiketleme Paneli", layout="wide")
+# ══════════════════════════════════════════════════════════════════
+# AYARLAR
+# ══════════════════════════════════════════════════════════════════
+st.set_page_config(
+    page_title="TBI Etiketleme Paneli",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.title("🧠 TBI / CQ500 Kesit İnceleme ve Etiketleme Paneli")
-
-# ── HUGGING FACE VE DOSYA AYARLARI ────────────────────────────────
 HF_REPO_ID = "oyailgin/CQ500_export300"
-HF_TOKEN = st.secrets.get("HF_TOKEN", "token")
-ZIP_FILENAME = "cq500_dual_slices.zip" 
+ZIP_FILENAME = "cq500_dual_slices.zip"
+ANNOTATION_FILE = "doctor_annotations.csv"
 
 LOCAL_DATA_DIR = Path("extracted_data")
-ANNOTATION_FILE = "doctor_annotations.csv"
-READS_CSV_PATH = LOCAL_DATA_DIR / "cq500_exact_300_reads.csv"
+ANNOTATION_PATH = Path(ANNOTATION_FILE)
 
 
-@st.cache_resource
-def download_and_extract_data():
-    """Hugging Face'teki private dataset'ten zip'i indirip çözer"""
-    if not LOCAL_DATA_DIR.exists():
-        os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
-        
-    st.info("🔄 Veriler Hugging Face'ten indiriliyor, lütfen bekleyin...")
+def _get_token() -> str | None:
     try:
+        tok = st.secrets.get("HF_TOKEN")
+    except Exception:
+        tok = None
+    return tok or os.environ.get("HF_TOKEN")
+
+
+HF_TOKEN = _get_token()
+
+WINDOW_PRESETS = {
+    "Beyin (40 / 80)": (40, 80),
+    "Subdural (75 / 215)": (75, 215),
+    "İnme (40 / 40)": (40, 40),
+    "Kemik (600 / 2800)": (600, 2800),
+    "Özel": None,
+}
+
+BASAL_OPTIONS = ["Normal (0)", "Sıkışmış / Compressed (1)", "Yok / Absent (2)"]
+
+STEPS = [
+    ("Falx — Ön", "Orta hattın ön (anterior) ucu"),
+    ("Falx — Arka", "Orta hattın arka (posterior) ucu"),
+    ("Kayan Yapı", "Orta hattan sapmış yapı"),
+]
+POINT_RGB = [(239, 68, 68), (34, 197, 94), (59, 130, 246)]
+POINT_HEX = ["#ef4444", "#22c55e", "#3b82f6"]
+
+CORE_COLS = [
+    "doctor_name", "patient_id", "slice_source", "slice_file", "slice_idx",
+    "falx_ant_x", "falx_ant_y", "falx_post_x", "falx_post_y",
+    "shift_point_x", "shift_point_y", "basal_status", "notes", "timestamp",
+]
+
+# ══════════════════════════════════════════════════════════════════
+# STİL
+# ══════════════════════════════════════════════════════════════════
+st.markdown(
+    """
+<style>
+.block-container {padding-top: 1.4rem; max-width: 1500px;}
+#MainMenu, footer {visibility: hidden;}
+
+.hero {
+    padding: 1.1rem 1.4rem; border-radius: 16px; margin-bottom: 1rem;
+    background: linear-gradient(120deg, rgba(99,102,241,.18), rgba(14,165,233,.14));
+    border: 1px solid rgba(128,128,128,.25);
+}
+.hero h1 {margin: 0; font-size: 1.55rem; padding: 0;}
+.hero p  {margin: .25rem 0 0 0; opacity: .75; font-size: .92rem;}
+
+.chip {
+    display: inline-block; padding: .15rem .65rem; border-radius: 999px;
+    font-size: .78rem; margin-right: .4rem; border: 1px solid rgba(128,128,128,.35);
+    background: rgba(128,128,128,.10);
+}
+.chip.ok  {background: rgba(34,197,94,.15);  border-color: rgba(34,197,94,.5);}
+.chip.warn{background: rgba(234,179,8,.15);  border-color: rgba(234,179,8,.5);}
+
+.step {
+    display: flex; gap: .75rem; align-items: center; padding: .55rem .75rem;
+    border-radius: 12px; margin-bottom: .45rem;
+    border: 1px solid rgba(128,128,128,.22);
+}
+.step small {opacity: .7;}
+.step.todo  {opacity: .5;}
+.step.active{border-color: rgba(99,102,241,.9); background: rgba(99,102,241,.10);}
+.step.done  {background: rgba(34,197,94,.08);}
+.step .dot {
+    width: 28px; height: 28px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 700; font-size: .85rem; background: var(--c);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ══════════════════════════════════════════════════════════════════
+# VERİ: İNDİRME & KEŞİF
+# ══════════════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner="📥 Veri seti Hugging Face'ten indiriliyor…")
+def ensure_data() -> str | None:
+    """Zip'i yalnızca bir kez indirip çıkarır. Hata varsa mesajı döner."""
+    marker = LOCAL_DATA_DIR / ".ready"
+    if marker.exists():
+        return None
+    try:
+        LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
         zip_path = hf_hub_download(
-            repo_id=HF_REPO_ID,
-            filename=ZIP_FILENAME,
-            repo_type="dataset",
-            token=HF_TOKEN
+            repo_id=HF_REPO_ID, filename=ZIP_FILENAME, repo_type="dataset", token=HF_TOKEN
         )
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(LOCAL_DATA_DIR)
-        st.success("✅ Veriler başarıyla yüklendi!")
-    except Exception as e:
-        st.error(f"Veri indirilirken hata oluştu: {e}")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(LOCAL_DATA_DIR)
+        marker.touch()
+        return None
+    except Exception as e:  # noqa: BLE001
+        return str(e)
 
-download_and_extract_data()
 
-# ── DICOM GÖRSELLEŞTİRME ────────────────────────────────────────
-def dcm_to_image(dcm_path):
+@st.cache_resource(show_spinner=False)
+def pull_annotations_once() -> None:
+    """Uygulama ilk açıldığında Hub'daki güncel annotation dosyasını getirir."""
+    if ANNOTATION_PATH.exists():
+        return
     try:
-        ds = pydicom.dcmread(str(dcm_path))
-        arr = ds.pixel_array.astype(float)
+        hf_hub_download(
+            repo_id=HF_REPO_ID, filename=ANNOTATION_FILE, repo_type="dataset",
+            token=HF_TOKEN, local_dir=".",
+        )
+    except Exception:  # noqa: BLE001  (dosya henüz yok olabilir)
+        pass
 
-        slope = getattr(ds, 'RescaleSlope', 1)
-        intercept = getattr(ds, 'RescaleIntercept', 0)
-        arr = arr * slope + intercept
 
-        # Tıbbi Beyin Penceresi (Brain Window): Level = 40, Width = 80
-        window_center = 40.0
-        window_width = 80.0
+def _has_dicom(d: Path) -> bool:
+    return next(d.rglob("*.dcm"), None) is not None
 
-        min_val = window_center - (window_width / 2.0)
-        max_val = window_center + (window_width / 2.0)
 
-        arr = np.clip(arr, min_val, max_val)
-        arr = ((arr - min_val) / (max_val - min_val)) * 255.0
-        arr = arr.astype(np.uint8)
+@st.cache_data(show_spinner=False)
+def discover_patients(base: str) -> tuple[str, list[str]]:
+    """Zip içindeki klasör yapısı ne olursa olsun hasta klasörlerini bulur."""
+    base_p = Path(base)
+    skip = ("_", ".")
+    top = sorted(p for p in base_p.iterdir() if p.is_dir() and not p.name.startswith(skip))
+    for root in [base_p, *top]:
+        pats = sorted(
+            p.name for p in root.iterdir()
+            if p.is_dir() and not p.name.startswith(skip) and _has_dicom(p)
+        )
+        if pats:
+            return str(root), pats
+    return str(base_p), []
 
-        return Image.fromarray(arr)
-    except Exception as e:
-        print(f"--- HATA DETAYI ---")
-        print(f"Dosya: {dcm_path}")
-        print(f"Hata mesajı: {str(e)}")
-        traceback.print_exc()
+
+def _natural_key(p: Path):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
+
+
+@st.cache_data(show_spinner=False)
+def list_slices(root: str, patient: str, source: str) -> list[str]:
+    pf = Path(root) / patient
+    sub = pf / ("ssa_slices" if source == "ssa" else "all_slices")
+    folder = sub if sub.exists() else pf
+    return [str(p) for p in sorted(folder.glob("*.dcm"), key=_natural_key)]
+
+
+@st.cache_data(show_spinner=False)
+def load_reads_meta() -> pd.DataFrame:
+    for p in LOCAL_DATA_DIR.rglob("*reads*.csv"):
+        try:
+            return pd.read_csv(p)
+        except Exception:  # noqa: BLE001
+            continue
+    return pd.DataFrame()
+
+
+def patient_meta(patient: str) -> dict:
+    df = load_reads_meta()
+    if df.empty or "name" not in df.columns:
+        return {}
+    row = df[df["name"].astype(str) == str(patient)]
+    return row.iloc[0].to_dict() if not row.empty else {}
+
+
+# ══════════════════════════════════════════════════════════════════
+# DICOM
+# ══════════════════════════════════════════════════════════════════
+@st.cache_data(max_entries=256, show_spinner=False)
+def load_slice(path: str) -> tuple[np.ndarray, float | None]:
+    """HU dizisi + piksel aralığı (mm). Pencereleme ayrı yapılır → ucuz."""
+    ds = pydicom.dcmread(path)
+    arr = ds.pixel_array.astype(np.float32)
+    arr = arr * float(getattr(ds, "RescaleSlope", 1)) + float(getattr(ds, "RescaleIntercept", 0))
+    ps = getattr(ds, "PixelSpacing", None)
+    return arr, (float(ps[0]) if ps else None)
+
+
+def apply_window(arr: np.ndarray, center: float, width: float) -> Image.Image:
+    lo, hi = center - width / 2.0, center + width / 2.0
+    out = np.clip((arr - lo) / max(hi - lo, 1e-6), 0, 1) * 255.0
+    return Image.fromarray(out.astype(np.uint8))
+
+
+@st.cache_data(max_entries=600, show_spinner=False)
+def thumbnail(path: str, center: float, width: float, size: int = 320) -> Image.Image | None:
+    try:
+        arr, _ = load_slice(path)
+        img = apply_window(arr, center, width)
+        img.thumbnail((size, size))
+        return img
+    except Exception:  # noqa: BLE001
         return None
 
-# Klasör yapısını bulma (İkili yapıya uyumlu arama)
-slices_root = LOCAL_DATA_DIR / "selected_slices"
-if not slices_root.exists():
-    sub_dirs = [d for d in LOCAL_DATA_DIR.iterdir() if d.is_dir()]
-    for d in sub_dirs:
-        if (d / "ssa_slices").exists() or (d / "all_slices").exists():
-            slices_root = d
-            break
-    if not slices_root.exists() and sub_dirs:
-        slices_root = sub_dirs[0]
 
-# Güvenli hasta listesi filtrelemesi
-patients = sorted([p for p in os.listdir(LOCAL_DATA_DIR) if os.path.isdir(LOCAL_DATA_DIR / p) and p != "__MACOSX"])
+# ══════════════════════════════════════════════════════════════════
+# ANNOTATION DEPOSU
+# ══════════════════════════════════════════════════════════════════
+def annotations_df() -> pd.DataFrame:
+    df = pd.DataFrame()
+    if ANNOTATION_PATH.exists():
+        try:
+            df = pd.read_csv(ANNOTATION_PATH)
+        except Exception:  # noqa: BLE001
+            df = pd.DataFrame()
+    for c in CORE_COLS:
+        if c not in df.columns:
+            df[c] = None
+    return df
 
-if not patients:
-    st.warning("⚠️ Hasta klasörleri bulunamadı. Lütfen HF repo adı ve zip dosya yapısını kontrol edin.")
-else:
-    # ── 1. HASTA GEZİNME ──
-    if "patient_index" not in st.session_state:
-        st.session_state.patient_index = 0
 
-    st.session_state.patient_index = min(
-        st.session_state.patient_index, len(patients) - 1
+def find_existing(df: pd.DataFrame, doctor: str, patient: str, source: str, fname: str):
+    if df.empty:
+        return None
+    m = (
+        (df["doctor_name"].astype(str) == doctor)
+        & (df["patient_id"].astype(str) == patient)
+        & (df["slice_source"].astype(str) == source)
+        & (df["slice_file"].astype(str) == fname)
     )
+    return df[m].iloc[0] if m.any() else None
 
-    def previous_patient():
-        st.session_state.patient_index = (
-            st.session_state.patient_index - 1
-        ) % len(patients)
 
-    def next_patient():
-        st.session_state.patient_index = (
-            st.session_state.patient_index + 1
-        ) % len(patients)
+def points_from_row(row) -> list[tuple[float, float]]:
+    try:
+        keys = [("falx_ant_x", "falx_ant_y"), ("falx_post_x", "falx_post_y"),
+                ("shift_point_x", "shift_point_y")]
+        pts = [(float(row[a]), float(row[b])) for a, b in keys]
+        return [] if any(math.isnan(v) for p in pts for v in p) else pts
+    except Exception:  # noqa: BLE001
+        return []
 
-    def sync_patient():
-        st.session_state.patient_index = patients.index(
-            st.session_state.selected_patient_selectbox
+
+def shift_metrics(pts, spacing):
+    """Kayan noktanın falx doğrusuna dik uzaklığı (piksel / mm)."""
+    (ax, ay), (px, py), (sx, sy) = pts
+    dx, dy = px - ax, py - ay
+    length2 = dx * dx + dy * dy
+    if length2 == 0:
+        return None
+    t = ((sx - ax) * dx + (sy - ay) * dy) / length2
+    fx, fy = ax + t * dx, ay + t * dy
+    dist = math.hypot(sx - fx, sy - fy)
+    return {"foot": (fx, fy), "px": dist, "mm": dist * spacing if spacing else None}
+
+
+# ══════════════════════════════════════════════════════════════════
+# CALLBACK'LER
+# ══════════════════════════════════════════════════════════════════
+def reset_slice():
+    st.session_state.slice_no = 1
+
+
+def go_patient(patients: list[str], delta: int):
+    cur = patients.index(st.session_state.patient)
+    st.session_state.patient = patients[(cur + delta) % len(patients)]
+    reset_slice()
+
+
+def go_next_pending(patients: list[str], done: set[str]):
+    cur = patients.index(st.session_state.patient)
+    for step in range(1, len(patients) + 1):
+        cand = patients[(cur + step) % len(patients)]
+        if cand not in done:
+            st.session_state.patient = cand
+            reset_slice()
+            return
+    st.toast("🎉 Tüm hastalar için en az bir kayıt var.")
+
+
+def step_slice(delta: int, n: int):
+    st.session_state.slice_no = min(max(st.session_state.slice_no + delta, 1), n)
+
+
+def open_slice(slice_no: int):
+    st.session_state.source = "all"
+    st.session_state.slice_no = slice_no
+    st.toast(f"Kesit {slice_no} → «İşaretleme» sekmesinde açıldı")
+
+
+def undo_point(key: str):
+    if st.session_state.get(key):
+        st.session_state[key].pop()
+
+
+def clear_points(key: str):
+    st.session_state[key] = []
+
+
+def save_annotation(ctx: dict):
+    pts = st.session_state.get(ctx["pts_key"], [])
+    doctor = ctx["doctor"].strip()
+    if len(pts) != 3 or not doctor:
+        st.session_state.flash = ("error", "3 nokta ve doktor adı gerekli.")
+        return
+
+    m = shift_metrics(pts, ctx["spacing"])
+    record = {
+        "doctor_name": doctor,
+        "patient_id": ctx["patient"],
+        "slice_source": ctx["source"],
+        "slice_file": ctx["fname"],
+        "slice_idx": ctx["idx"],
+        "img_w": ctx["img_w"],
+        "img_h": ctx["img_h"],
+        "pixel_spacing_mm": ctx["spacing"],
+        "falx_ant_x": pts[0][0], "falx_ant_y": pts[0][1],
+        "falx_post_x": pts[1][0], "falx_post_y": pts[1][1],
+        "shift_point_x": pts[2][0], "shift_point_y": pts[2][1],
+        "midline_shift_px": round(m["px"], 2) if m else None,
+        "midline_shift_mm": round(m["mm"], 2) if m and m["mm"] is not None else None,
+        "basal_status": st.session_state[ctx["basal_key"]],
+        "notes": st.session_state[ctx["notes_key"]],
+        "timestamp": str(pd.Timestamp.now()),
+    }
+    for k, v in patient_meta(ctx["patient"]).items():
+        record.setdefault(k, v)
+
+    # Başka doktorların kayıtlarını ezmemek için önce Hub'daki en güncel dosyayı çek
+    try:
+        hf_hub_download(
+            repo_id=HF_REPO_ID, filename=ANNOTATION_FILE, repo_type="dataset",
+            token=HF_TOKEN, local_dir=".", force_download=True,
         )
-        st.session_state.all_slice_index = 0
+    except Exception:  # noqa: BLE001
+        pass
 
-    st.sidebar.markdown("### 📂 Hasta Gezinme")
-
-    col_prev, col_next = st.sidebar.columns(2)
-
-    col_prev.button(
-        "⬅️ Önceki Hasta",
-        use_container_width=True,
-        on_click=previous_patient,
-        key="prev_patient_btn"
+    df_old = annotations_df()
+    for c in record:
+        if c not in df_old.columns:
+            df_old[c] = None
+    same = (
+        (df_old["doctor_name"].astype(str) == doctor)
+        & (df_old["patient_id"].astype(str) == ctx["patient"])
+        & (df_old["slice_source"].astype(str) == ctx["source"])
+        & (df_old["slice_file"].astype(str) == ctx["fname"])
     )
+    df_all = pd.concat([df_old[~same], pd.DataFrame([record])], ignore_index=True)
+    df_all.to_csv(ANNOTATION_PATH, index=False)
 
-    col_next.button(
-        "Sonraki Hasta ➡️",
-        use_container_width=True,
-        on_click=next_patient,
-        key="next_patient_btn"
-    )
+    try:
+        HfApi(token=HF_TOKEN).upload_file(
+            path_or_fileobj=str(ANNOTATION_PATH),
+            path_in_repo=ANNOTATION_FILE,
+            repo_id=HF_REPO_ID,
+            repo_type="dataset",
+            commit_message=f"{doctor}: {ctx['patient']} / {ctx['fname']}",
+        )
+        st.session_state.flash = ("success", f"Kaydedildi ve Hub'a gönderildi: {ctx['patient']} · {ctx['fname']}")
+    except Exception as e:  # noqa: BLE001
+        st.session_state.flash = ("warning", f"Yerel kayıt yapıldı, Hub'a yüklenemedi: {e}")
 
-    st.session_state.selected_patient_selectbox = patients[
-        st.session_state.patient_index
-    ]
+    if ctx["advance"] and st.session_state.slice_no < ctx["n"]:
+        st.session_state.slice_no += 1
 
-    st.sidebar.selectbox(
-        "Hasta Seçin",
-        patients,
-        key="selected_patient_selectbox",
-        on_change=sync_patient
-    )
 
-    selected_patient = patients[st.session_state.patient_index]
+# ══════════════════════════════════════════════════════════════════
+# GÖRSELLEŞTİRME
+# ══════════════════════════════════════════════════════════════════
+def draw_overlay(img: Image.Image, pts, scale: float, metrics) -> Image.Image:
+    rgb = img.convert("RGB")
+    rgb = rgb.resize((round(rgb.width * scale), round(rgb.height * scale)), Image.LANCZOS)
+    d = ImageDraw.Draw(rgb)
+    sp = [(x * scale, y * scale) for x, y in pts]
 
-    doctor_name = st.sidebar.text_input("👨‍⚕️ Doktor Adı / ID", value="Dr. Uzman")
+    if len(sp) >= 2:
+        d.line([sp[0], sp[1]], fill=(250, 204, 21), width=2)
+    if len(sp) == 3 and metrics:
+        foot = (metrics["foot"][0] * scale, metrics["foot"][1] * scale)
+        d.line([sp[2], foot], fill=(34, 211, 238), width=2)
 
-    # ── HASTAYA AİT GEÇMİŞ DOKTOR TEŞHİSLERİ / NOTLARI ──
-    st.markdown("---")
-    st.markdown("📜 **Bu Hasta İçin Geçmiş Etiketler ve Teşhisler:**")
-    
-    local_csv = Path(ANNOTATION_FILE)
-    if local_csv.exists():
-        df_existing = pd.read_csv(local_csv)
-        patient_history = df_existing[df_existing["patient_id"].astype(str) == str(selected_patient)]
-        
-        if not patient_history.empty:
-            display_cols = [c for c in ["doctor_name", "timestamp", "basal_status", "notes"] if c in patient_history.columns]
-            st.dataframe(patient_history[display_cols], use_container_width=True)
+    for i, (x, y) in enumerate(sp):
+        r = 7
+        d.ellipse([x - r, y - r, x + r, y + r], fill=POINT_RGB[i], outline=(255, 255, 255), width=2)
+        d.text((x + 11, y - 7), str(i + 1), fill=POINT_RGB[i])
+    return rgb
+
+
+def stepper_html(n_pts: int) -> str:
+    out = []
+    for i, (title, desc) in enumerate(STEPS):
+        state = "done" if i < n_pts else ("active" if i == n_pts else "todo")
+        mark = "✓" if state == "done" else str(i + 1)
+        out.append(
+            f'<div class="step {state}"><span class="dot" style="--c:{POINT_HEX[i]}">{mark}</span>'
+            f"<div><b>{title}</b><br><small>{desc}</small></div></div>"
+        )
+    return "".join(out)
+
+
+# ══════════════════════════════════════════════════════════════════
+# SEKMELER
+# ══════════════════════════════════════════════════════════════════
+def render_marking_tab(root, patient, doctor, df_ann, win, disp_w, advance, ssa_n, all_n):
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        {"success": st.success, "warning": st.warning, "error": st.error}[flash[0]](flash[1])
+
+    # ── kesit kaynağı + gezinme ──
+    options = [s for s, n in (("ssa", ssa_n), ("all", all_n)) if n > 0]
+    if not options:
+        st.warning("Bu hasta için DICOM kesiti bulunamadı.")
+        return
+    if st.session_state.get("source") not in options:
+        st.session_state.source = options[0]
+
+    labels = {"ssa": f"🎯 SSA seçili kesitler ({ssa_n})", "all": f"🩻 Tüm kesitler ({all_n})"}
+    top_l, top_r = st.columns([2, 3])
+    with top_l:
+        source = st.radio(
+            "Kesit kaynağı", options, key="source", horizontal=True,
+            format_func=lambda s: labels[s], on_change=reset_slice,
+            label_visibility="collapsed",
+        )
+    files = list_slices(root, patient, source)
+    n = len(files)
+    st.session_state.slice_no = min(max(st.session_state.get("slice_no", 1), 1), n)
+
+    with top_r:
+        b1, mid, b2 = st.columns([1, 6, 1])
+        b1.button("◀", key="prev_slice", use_container_width=True,
+                  disabled=st.session_state.slice_no <= 1, on_click=step_slice, args=(-1, n))
+        if n > 1:
+            mid.slider("Kesit", 1, n, key="slice_no", label_visibility="collapsed")
         else:
-            st.info("ℹ️ Bu hasta için henüz kayıt girilmemiş.")
-    else:
-        st.info("ℹ️ Henüz sistemde kayıtlı annotation dosyası yok.")
+            mid.caption("Tek kesit")
+        b2.button("▶", key="next_slice", use_container_width=True,
+                  disabled=st.session_state.slice_no >= n, on_click=step_slice, args=(1, n))
 
-    # ── 2. DOKTOR / HASTA TAKİP BİLGİSİ ──
-    st.subheader(f"Seçilen Hasta: {selected_patient} ({st.session_state.patient_index + 1}/{len(patients)})")
-    st.info(f"👤 **Aktif İnceleme Sorumlusu:** {doctor_name} | **Durum:** Veriler ve kesitler incelenmeye hazır.")
+    idx = st.session_state.slice_no - 1
+    path = files[idx]
+    fname = Path(path).name
 
-    # SSA Slices Klasör Yolu
-    patient_folder = LOCAL_DATA_DIR / selected_patient
-    ssa_folder = patient_folder / "ssa_slices"
-    target_dcm_folder = ssa_folder if ssa_folder.exists() else patient_folder
-    
-    dcm_files = sorted(list(target_dcm_folder.glob("*.dcm")))
+    try:
+        arr, spacing = load_slice(path)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"DICOM okunamadı ({fname}): {e}")
+        return
+    base_img = apply_window(arr, *win)
+    img_w, img_h = base_img.size
 
-    if dcm_files:
-        st.markdown("🔍 **SSA Algoritması Tarafından Seçilen Kesitler (DICOM):**")
-        cols = st.columns(len(dcm_files) if len(dcm_files) <= 6 else 6)
+    # ── nokta durumu (kesit başına) ──
+    state_key = f"{patient}::{source}::{fname}"
+    pts_key, basal_key, notes_key = f"pts::{state_key}", f"basal::{state_key}", f"notes::{state_key}"
+    existing = find_existing(df_ann, doctor, patient, source, fname)
 
-        for idx, dcm_file in enumerate(dcm_files):
-            col_idx = idx % 6
-            with cols[col_idx]:
-                pil_img = dcm_to_image(dcm_file)
-                if pil_img:
-                    st.image(pil_img, caption=f"Kesit {idx+1}", use_container_width=True)
-                else:
-                    st.error("Okunamadı")
+    if pts_key not in st.session_state:
+        st.session_state[pts_key] = points_from_row(existing) if existing is not None else []
+    if basal_key not in st.session_state:
+        b = str(existing["basal_status"]) if existing is not None else BASAL_OPTIONS[0]
+        st.session_state[basal_key] = b if b in BASAL_OPTIONS else BASAL_OPTIONS[0]
+    if notes_key not in st.session_state:
+        nt = existing["notes"] if existing is not None else ""
+        st.session_state[notes_key] = "" if pd.isna(nt) else str(nt)
 
-        st.markdown("---")
+    pts: list = st.session_state[pts_key]
+    metrics = shift_metrics(pts, spacing) if len(pts) == 3 else None
 
-        # ── MIDLINE SHIFT İÇİN NOKTA İŞARETLEME (3 NOKTA + DİNAMİK REHBER) ────────
-        st.markdown("📍 **Midline Shift İşaretleme (Model Eğitimi İçin 3 Anatomik Nokta)**")
+    left, right = st.columns([3, 2], gap="large")
 
-        slice_names = [f"Kesit {i + 1}" for i in range(len(dcm_files))]
-        selected_slice_idx = st.selectbox(
-            "İşaretleme yapılacak kesiti seçin", range(len(dcm_files)),
-            format_func=lambda i: slice_names[i]
+    # ── görüntü + tıklama ──
+    with left:
+        scale = disp_w / img_w
+        disp_img = draw_overlay(base_img, pts, scale, metrics)
+        coords = streamlit_image_coordinates(disp_img, key=f"click::{state_key}")
+
+        if coords is not None:
+            last_key = f"lastclick::{state_key}"
+            if coords.get("unix_time") != st.session_state.get(last_key):
+                st.session_state[last_key] = coords.get("unix_time")
+                if len(pts) < 3:
+                    factor = img_w / (coords.get("width") or disp_img.width)
+                    pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
+                    st.rerun()
+
+        saved_badge = '<span class="chip ok">✓ kayıtlı</span>' if existing is not None else \
+                      '<span class="chip warn">kayıt yok</span>'
+        st.markdown(
+            f'<span class="chip">{fname}</span><span class="chip">Kesit {idx + 1}/{n}</span>'
+            f'<span class="chip">{img_w}×{img_h}</span>{saved_badge}',
+            unsafe_allow_html=True,
         )
 
-        points_key = f"points_{selected_patient}_{selected_slice_idx}"
-        if points_key not in st.session_state:
-            st.session_state[points_key] = []
+    # ── sağ panel ──
+    with right:
+        with st.container(border=True):
+            st.markdown("**📍 Midline Shift İşaretleme**")
+            st.markdown(stepper_html(len(pts)), unsafe_allow_html=True)
 
-        points = st.session_state[points_key]
+            c1, c2 = st.columns(2)
+            c1.button("↩️ Geri al", use_container_width=True, disabled=not pts,
+                      on_click=undo_point, args=(pts_key,))
+            c2.button("🗑️ Temizle", use_container_width=True, disabled=not pts,
+                      on_click=clear_points, args=(pts_key,))
 
-        # Doktorlar için adım adım rehber bilgilendirme metni
-        if len(points) == 0:
-            st.info("👉 **1. Adım:** Lütfen beyin orta hattının **Ön (Anterior) Noktasını (Falx Ant)** işaretleyin.")
-        elif len(points) == 1:
-            st.info("👉 **2. Adım:** Lütfen beyin orta hattının **Arka (Posterior) Noktasını (Falx Post)** işaretleyin.")
-        elif len(points) == 2:
-            st.info("👉 **3. Adım:** Lütfen orta hattan sapmış olan **Kaymış Yapıyı (Shift Point)** işaretleyin.")
-        else:
-            st.success("✅ 3 nokta başarıyla tamamlandı! Aşağıdan formu doldurup kaydedebilirsiniz.")
+            if metrics:
+                val = f"{metrics['mm']:.1f} mm" if metrics["mm"] is not None else f"{metrics['px']:.0f} px"
+                st.metric("Tahmini midline shift", val,
+                          help="Kayan noktanın falx doğrusuna dik uzaklığı (otomatik hesaplanır).")
 
-        mark_img = dcm_to_image(dcm_files[selected_slice_idx])
+        with st.container(border=True):
+            st.markdown("**📋 Klinik Değerlendirme**")
+            st.radio("Bazal sistern durumu", BASAL_OPTIONS, key=basal_key)
+            st.text_area("Klinik notlar", key=notes_key, height=110,
+                         placeholder="Gözlem, şüphe, yorum…")
 
-        if mark_img:
-            mark_img_rgb = mark_img.convert("RGB")
-            draw_arr = np.array(mark_img_rgb)
-
-            # İşaretlenen noktaları farklı renklerle gösterelim (Kırmızı, Yeşil, Mavi)
-            colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]]
-            for idx, (px, py) in enumerate(points):
-                y0, y1 = max(0, py - 4), min(draw_arr.shape[0], py + 4)
-                x0, x1 = max(0, px - 4), min(draw_arr.shape[1], px + 4)
-                draw_arr[y0:y1, x0:x1] = colors[idx % 3]
-
-            display_img = Image.fromarray(draw_arr)
-            coords = streamlit_image_coordinates(display_img, key=f"click_{points_key}")
-
-            if coords is not None:
-                new_point = (coords["x"], coords["y"])
-                if not points or points[-1] != new_point:
-                    if len(points) < 3:
-                        points.append(new_point)
-                        st.rerun()
-
-            st.caption(f"İşaretlenen nokta sayısı: {len(points)}/3")
-            if st.button("🔄 Tüm Noktaları Temizle"):
-                st.session_state[points_key] = []
-                st.rerun()
-
-        st.markdown("---")
-
-        # ── FORM ALANI ────────────────────────────────────────────
-        with st.form("annotation_form"):
-            st.subheader("📋 Klinik Değerlendirme Formu")
-
-            if len(points) == 3:
-                st.success(f"✅ Hazır Noktalar -> 1.Falx Ant: {points[0]} | 2.Falx Post: {points[1]} | 3.Kaymış Yapı: {points[2]}")
-            else:
-                st.warning("⚠️ Kaydetmeden önce yukarıda sırasıyla tam olarak 3 nokta işaretlemelisiniz.")
-
-            basal_status = st.selectbox(
-                "Bazal Sistern Durumu",
-                ["Normal (0)", "Sıkışmış / Compressed (1)", "Yok / Absent (2)"]
+            ctx = dict(
+                pts_key=pts_key, basal_key=basal_key, notes_key=notes_key, doctor=doctor,
+                patient=patient, source=source, fname=fname, idx=idx, n=n,
+                img_w=img_w, img_h=img_h, spacing=spacing, advance=advance,
             )
-
-            notes = st.text_area("Klinik Notlar / Açıklamalar")
-            submitted = st.form_submit_button("💾 İşaretlemeyi Kaydet ve HF'ye Gönder")
-
-            if submitted:
-                if len(points) != 3:
-                    st.error("Kaydetmeden önce sırasıyla tam 3 nokta işaretlemelisiniz.")
-                    st.stop()
-
-                # Model eğitimi için anlamlı ve düzenli sütun adları
-                new_record = {
-                    "doctor_name": doctor_name,
-                    "patient_id": selected_patient,
-                    "slice_idx": selected_slice_idx,
-                    "falx_ant_x": points[0][0],
-                    "falx_ant_y": points[0][1],
-                    "falx_post_x": points[1][0],
-                    "falx_post_y": points[1][1],
-                    "shift_point_x": points[2][0],
-                    "shift_point_y": points[2][1],
-                    "basal_status": basal_status,
-                    "notes": notes,
-                    "timestamp": str(pd.Timestamp.now())
-                }
-
-                if READS_CSV_PATH.exists():
-                    df_reads = pd.read_csv(READS_CSV_PATH)
-                    patient_meta = df_reads[df_reads['name'].astype(str) == str(selected_patient)]
-                    if not patient_meta.empty:
-                        meta_dict = patient_meta.iloc[0].to_dict()
-                        new_record.update(meta_dict)
-
-                df_new = pd.DataFrame([new_record])
-                local_csv = Path(ANNOTATION_FILE)
-
-                if local_csv.exists():
-                    df_old = pd.read_csv(local_csv)
-                    for col in new_record.keys():
-                        if col not in df_old.columns:
-                            df_old[col] = None
-
-                    mask = (df_old["patient_id"] == selected_patient) & \
-                           (df_old["slice_idx"] == selected_slice_idx)
-
-                    if mask.any():
-                        for col, val in new_record.items():
-                            df_old.loc[mask, col] = val
-                        df_combined = df_old
-                    else:
-                        df_combined = pd.concat([df_old, df_new], ignore_index=True)
-                else:
-                    df_combined = df_new
-
-                df_combined.to_csv(local_csv, index=False)
-
-                try:
-                    api = HfApi(token=HF_TOKEN)
-                    api.upload_file(
-                        path_or_fileobj=str(local_csv),
-                        path_in_repo=ANNOTATION_FILE,
-                        repo_id=HF_REPO_ID,
-                        repo_type="dataset",
-                        commit_message=f"Doktor notu ve anatomik noktalar eklendi: {selected_patient}"
-                    )
-                    st.success(f"✅ {selected_patient} için anatomik noktalar ve veriler başarıyla HF'ye yüklendi!")
-                    st.session_state[points_key] = []
-                except Exception as e:
-                    st.error(f"Kayıt yapıldı ancak HF'ye yüklenirken hata oluştu: {e}")
-
-
-# ── TÜM KESİTLER: IZGARA VE BÜYÜK GÖRÜNÜM ──
-
-st.markdown("---")
-st.markdown("### 🩻 Tüm Kesitler — Izgara Görünümü")
-
-if patients:
-    
-    if "all_slice_index" not in st.session_state:
-        st.session_state.all_slice_index = 0
-
-    patient_folder = LOCAL_DATA_DIR / selected_patient
-    all_slices_folder = patient_folder / "all_slices"
-
-    if all_slices_folder.exists():
-        all_dcm_files = sorted(all_slices_folder.glob("*.dcm"))
-    else:
-        all_dcm_files = sorted(patient_folder.glob("*.dcm"))
-
-    if all_dcm_files:
-        st.session_state.all_slice_index = min(
-            st.session_state.all_slice_index,
-            len(all_dcm_files) - 1
-        )
-
-        st.info(
-            f"📂 {selected_patient} — "
-            f"Toplam {len(all_dcm_files)} kesit"
-        )
-
-        selected_idx = st.session_state.all_slice_index
-        selected_dcm = all_dcm_files[selected_idx]
-        selected_img = dcm_to_image(selected_dcm)
-
-        st.markdown("#### 🔎 Seçili Kesit")
-
-        if selected_img is not None:
-            st.image(
-                selected_img,
-                caption=(
-                    f"{selected_dcm.name} — "
-                    f"Kesit {selected_idx + 1}/{len(all_dcm_files)}"
-                ),
-                width=650
-            )
-
-        prev_col, info_col, next_col = st.columns([1, 2, 1])
-
-        with prev_col:
             st.button(
-                "⬅️ Önceki Kesit",
-                key="all_prev_slice",
-                use_container_width=True,
-                disabled=(selected_idx == 0),
-                on_click=lambda: setattr(
-                    st.session_state,
-                    "all_slice_index",
-                    st.session_state.all_slice_index - 1
-                )
+                "💾 Kaydet" + (" ve sonraki kesite geç" if advance else ""),
+                type="primary", use_container_width=True,
+                disabled=len(pts) != 3 or not doctor.strip(),
+                on_click=save_annotation, args=(ctx,),
             )
+            if len(pts) != 3:
+                st.caption(f"Kaydetmek için {3 - len(pts)} nokta daha işaretleyin.")
+            elif not doctor.strip():
+                st.caption("Kenar çubuğuna doktor adını girin.")
 
-        with info_col:
-            st.markdown(
-                f"<div style='text-align:center; padding-top:8px'>"
-                f"Kesit {selected_idx + 1} / {len(all_dcm_files)}"
-                f"</div>",
-                unsafe_allow_html=True
-            )
 
-        with next_col:
-            st.button(
-                "Sonraki Kesit ➡️",
-                key="all_next_slice",
-                use_container_width=True,
-                disabled=(selected_idx == len(all_dcm_files) - 1),
-                on_click=lambda: setattr(
-                    st.session_state,
-                    "all_slice_index",
-                    st.session_state.all_slice_index + 1
-                )
-            )
+def render_grid_tab(patient, doctor, df_ann, win, files):
+    n = len(files)
+    if n == 0:
+        st.warning("Bu hasta için kesit bulunamadı.")
+        return
 
-        st.markdown("---")
-        st.markdown("#### 🗂️ Tüm Kesitler")
-        st.caption(
-            "Bir kesitin altındaki büyütme düğmesine basarak "
-            "onu üstteki büyük görüntüleme alanında açabilirsiniz."
-        )
+    done_files = set(
+        df_ann[(df_ann["doctor_name"].astype(str) == doctor)
+               & (df_ann["patient_id"].astype(str) == patient)]["slice_file"].dropna().astype(str)
+    )
 
-        grid_cols = st.columns(4)
+    per_page, ncols = 12, 4
+    pages = max(1, math.ceil(n / per_page))
+    head_l, head_r = st.columns([4, 1])
+    head_l.caption(f"{patient} · toplam {n} kesit · ✓ işaretli: {len(done_files & {Path(f).name for f in files})}")
+    page = head_r.number_input("Sayfa", 1, pages, 1, key=f"grid_page::{patient}") if pages > 1 else 1
 
-        for idx, dcm_file in enumerate(all_dcm_files):
-            with grid_cols[idx % 4]:
-                img = dcm_to_image(dcm_file)
-
+    chunk = files[(page - 1) * per_page: page * per_page]
+    cols = st.columns(ncols)
+    for i, f in enumerate(chunk):
+        gi = (page - 1) * per_page + i
+        with cols[i % ncols]:
+            with st.container(border=True):
+                img = thumbnail(f, *win)
                 if img is not None:
                     st.image(img, use_container_width=True)
-
-                    st.caption(f"Kesit {idx + 1}")
-
-                    st.button(
-                        "🔍 Büyüt",
-                        key=f"zoom_slice_{selected_patient}_{idx}",
-                        use_container_width=True,
-                        type=(
-                            "primary"
-                            if idx == st.session_state.all_slice_index
-                            else "secondary"
-                        ),
-                        on_click=lambda i=idx: setattr(
-                            st.session_state, "all_slice_index", i
-                        )
-                    )
                 else:
-                    st.error(f"Kesit {idx + 1} okunamadı.")
+                    st.error("Okunamadı")
+                mark = " ✓" if Path(f).name in done_files else ""
+                st.caption(f"Kesit {gi + 1}{mark}")
+                st.button("İşaretle", key=f"open::{patient}::{gi}", use_container_width=True,
+                          on_click=open_slice, args=(gi + 1,))
 
+
+def render_history_tab(patient, df_ann):
+    mine = df_ann[df_ann["patient_id"].astype(str) == patient].dropna(how="all", axis=1)
+    st.markdown(f"**{patient}** için kayıtlar")
+    if mine.empty:
+        st.info("Bu hasta için henüz kayıt yok.")
     else:
-        st.warning(
-            f"{selected_patient} için all_slices klasöründe "
-            "DICOM dosyası bulunamadı."
-        )
+        cols = [c for c in ["doctor_name", "slice_source", "slice_file", "midline_shift_mm",
+                            "midline_shift_px", "basal_status", "notes", "timestamp"] if c in mine.columns]
+        st.dataframe(mine[cols], use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    c1, c2, c3 = st.columns(3)
+    valid = df_ann.dropna(subset=["patient_id"])
+    c1.metric("Toplam kayıt", len(valid))
+    c2.metric("İşaretlenen hasta", valid["patient_id"].nunique())
+    c3.metric("Doktor sayısı", valid["doctor_name"].nunique())
+    if not valid.empty:
+        st.download_button("⬇️ Tüm kayıtları CSV indir", valid.to_csv(index=False).encode("utf-8"),
+                           file_name=ANNOTATION_FILE, mime="text/csv")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ANA AKIŞ
+# ══════════════════════════════════════════════════════════════════
+st.markdown(
+    '<div class="hero"><h1>🧠 TBI / CQ500 Etiketleme Paneli</h1>'
+    "<p>Midline shift için 3 anatomik nokta · bazal sistern değerlendirmesi · Hugging Face senkronizasyonu</p></div>",
+    unsafe_allow_html=True,
+)
+
+err = ensure_data()
+if err:
+    st.error(f"Veri indirilemedi: {err}")
+    if st.button("🔄 Yeniden dene"):
+        ensure_data.clear()
+        st.rerun()
+    st.stop()
+
+pull_annotations_once()
+root, patients = discover_patients(str(LOCAL_DATA_DIR))
+if not patients:
+    st.warning("Hasta klasörü bulunamadı. HF repo adını ve zip yapısını kontrol edin.")
+    st.stop()
+
+# ── kenar çubuğu ──
+with st.sidebar:
+    st.markdown("### 👨‍⚕️ Doktor")
+    doctor = st.text_input("Doktor adı / ID", value="Dr. Uzman", label_visibility="collapsed")
+
+    df_ann = annotations_df()
+    my = df_ann[df_ann["doctor_name"].astype(str) == doctor]
+    done_patients = set(my["patient_id"].dropna().astype(str))
+
+    if st.session_state.get("patient") not in patients:
+        st.session_state.patient = patients[0]
+
+    st.markdown("### 📂 Hasta")
+    p1, p2 = st.columns(2)
+    p1.button("◀ Önceki", use_container_width=True, on_click=go_patient, args=(patients, -1))
+    p2.button("Sonraki ▶", use_container_width=True, on_click=go_patient, args=(patients, +1))
+    st.selectbox(
+        "Hasta", patients, key="patient", on_change=reset_slice, label_visibility="collapsed",
+        format_func=lambda p: f"{'✅' if p in done_patients else '⬜'}  {p}",
+    )
+    st.button("⏭️ Sonraki işaretlenmemiş hasta", use_container_width=True,
+              on_click=go_next_pending, args=(patients, done_patients))
+
+    st.progress(len(done_patients) / len(patients),
+                text=f"İlerleme: {len(done_patients)}/{len(patients)} hasta")
+
+    st.markdown("### 🎚️ Görüntü")
+    preset = st.selectbox("Pencere", list(WINDOW_PRESETS), index=0)
+    if WINDOW_PRESETS[preset] is None:
+        wc = st.slider("Window Level", -200, 1000, 40)
+        ww = st.slider("Window Width", 1, 4000, 80)
+    else:
+        wc, ww = WINDOW_PRESETS[preset]
+    disp_w = st.slider("Görüntü genişliği (px)", 400, 900, 620, 20)
+    advance = st.toggle("Kaydedince sonraki kesite geç", value=True)
+
+patient = st.session_state.patient
+ssa_files = list_slices(root, patient, "ssa")
+all_files = list_slices(root, patient, "all")
+# Her iki klasör de yoksa list_slices aynı yedek klasörü döndürür; tekrarı önle
+ssa_n = len(ssa_files)
+all_n = len(all_files) if all_files != ssa_files or Path(root, patient, "all_slices").exists() else 0
+
+st.markdown(
+    f"#### {patient} "
+    f'<span class="chip">{patients.index(patient) + 1}/{len(patients)}</span>'
+    f'<span class="chip {"ok" if patient in done_patients else "warn"}">'
+    f'{"işaretlendi" if patient in done_patients else "bekliyor"}</span>',
+    unsafe_allow_html=True,
+)
+
+tab_mark, tab_grid, tab_hist = st.tabs(["🎯 İşaretleme", "🩻 Tüm Kesitler", "📜 Kayıtlar"])
+with tab_mark:
+    render_marking_tab(root, patient, doctor, df_ann, (wc, ww), disp_w, advance, ssa_n, all_n)
+with tab_grid:
+    render_grid_tab(patient, doctor, df_ann, (wc, ww), all_files if all_files else ssa_files)
+with tab_hist:
+    render_history_tab(patient, df_ann)
