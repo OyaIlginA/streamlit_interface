@@ -697,13 +697,14 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                 saved = find_existing(df_ann, doctor, patient, "all", fname)
             st.session_state[points_key] = points_from_row(saved) if saved is not None else []
 
-    for fname in all_names:
-        basal_key = _batch_key(patient, "basal", fname)
-        if basal_key not in st.session_state:
-            saved = find_existing(df_ann, doctor, patient, "all", fname)
-            if saved is None and fname in ssa_names:
-                saved = find_existing(df_ann, doctor, patient, "ssa", fname)
-            st.session_state[basal_key] = choice_from_row(saved, "basal_status", BASAL_OPTIONS)
+    basal_key = f"batch::{patient}::basal-status"
+    if basal_key not in st.session_state:
+        prior_basal = df_ann[
+            (df_ann["doctor_name"].astype(str) == doctor)
+            & (df_ann["patient_id"].astype(str) == patient)
+            & df_ann["basal_status"].astype(str).isin(BASAL_OPTIONS)
+        ]
+        st.session_state[basal_key] = prior_basal.iloc[-1]["basal_status"] if not prior_basal.empty else None
 
     mid_active_key = f"batch::{patient}::active-midline"
     basal_active_key = f"batch::{patient}::active-basal"
@@ -720,10 +721,8 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
         )
         for fname in ssa_names
     )
-    basal_complete = sum(
-        st.session_state[_batch_key(patient, "basal", fname)] in BASAL_OPTIONS
-        for fname in all_names
-    )
+    basal_status = st.session_state[basal_key]
+    basal_complete = int(basal_status in BASAL_OPTIONS)
 
     st.markdown("### 🧭 Midline Shift · SSA kesitleri")
     st.caption("Yalnızca SSA seçilmiş kesitler gösterilir. Her kesitte durumu seçin; 'Var' seçildiğinde büyütülmüş görüntü üzerinden üç noktayı sırayla işaretleyin.")
@@ -786,7 +785,7 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
     st.markdown("---")
     st.markdown("### 📋 Bazal Sistern · tüm kesitler")
     st.caption("Tüm mevcut kesitler aynı anda gösterilir. Kesit seçildiğinde büyütülür; bazal sistern seçim paneli görüntünün altında yer alır.")
-    st.progress(basal_complete / max(len(all_names), 1), text=f"Bazal sistern tamamlandı: {basal_complete}/{len(all_names)}")
+    st.progress(basal_complete, text=f"Bazal sistern: {'Seçildi ve tüm kesitlere uygulanacak' if basal_complete else 'Henüz seçilmedi'}")
     _render_all_slice_cards(all_files, patient, "basal", basal_active_key, win, grid_cols)
 
     active_basal = st.session_state.get(basal_active_key)
@@ -801,13 +800,13 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                 st.image(img, caption=active_basal, width=img.width)
             except Exception as e:  # noqa: BLE001
                 st.error(f"DICOM okunamadı ({active_basal}): {e}")
-            st.radio("Bazal sistern durumu", BASAL_OPTIONS,
-                     key=_batch_key(patient, "basal", active_basal), index=None, horizontal=True)
+                st.radio("Bazal sistern durumu (seçim tüm kesitlere uygulanır)", BASAL_OPTIONS,
+                     key=basal_key, index=None, horizontal=True)
 
-    all_complete = bool(ssa_names and all_names) and midline_complete == len(ssa_names) and basal_complete == len(all_names)
+            all_complete = bool(ssa_names and all_names) and midline_complete == len(ssa_names) and basal_complete == 1
     st.markdown("---")
     if not all_complete:
-        st.info("Not alanı, her SSA kesitinin midline durumu (Var ise üç nokta dahil) ve tüm kesitlerin bazal sistern seçimi tamamlandıktan sonra açılır.")
+        st.info("Not alanı, her SSA kesitinin midline durumu (Var ise üç nokta dahil) ve bazal sistern için tek ortak seçim tamamlandıktan sonra açılır.")
         return
 
     st.markdown("### 📝 Not ve kayıt")
@@ -826,6 +825,7 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
             st.session_state.flash = ("error", "Doktor adı zorunludur.")
             return
         records = []
+        basal_status = st.session_state[basal_key]
         file_by_name = {Path(p).name: p for p in ssa_files + all_files}
         ssa_name_set, all_name_set = set(ssa_names), set(all_names)
         ssa_index = {Path(path).name: idx for idx, path in enumerate(ssa_files)}
@@ -856,7 +856,7 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                 "shift_point_y": pts[2][1] if len(pts) == 3 else None,
                 "midline_shift_px": round(metrics["px"], 2) if metrics else None,
                 "midline_shift_mm": round(metrics["mm"], 2) if metrics and metrics["mm"] is not None else None,
-                "basal_status": st.session_state[_batch_key(patient, "basal", fname)] if fname in all_name_set else None,
+                "basal_status": basal_status,
                 "notes": st.session_state[notes_key], "timestamp": str(pd.Timestamp.now()),
             }
             record.update({k: v for k, v in patient_meta(patient).items() if k not in record})
