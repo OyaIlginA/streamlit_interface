@@ -224,8 +224,8 @@ def apply_window(arr: np.ndarray, center: float, width: float) -> Image.Image:
     return Image.fromarray(out.astype(np.uint8))
 
 
-@st.cache_data(max_entries=600, show_spinner=False)
-def thumbnail(path: str, center: float, width: float, size: int = 360) -> Image.Image | None:
+@st.cache_data(max_entries=1600, show_spinner=False)
+def thumbnail(path: str, center: float, width: float, size: int = 160) -> Image.Image | None:
     try:
         arr, _ = load_slice(path)
         img = apply_window(arr, center, width)
@@ -649,14 +649,19 @@ def _set_active_slice(key: str, fname: str):
     st.session_state[key] = fname
 
 
-def _render_all_slice_cards(files, patient, category, active_key, win, grid_cols):
+def _activate_midline_slice(active_key: str, fname: str, detail_key: str):
+    st.session_state[active_key] = fname
+    st.session_state[detail_key] = True
+
+
+def _render_all_slice_cards(files, patient, category, active_key, win, grid_cols, detail_key=None):
     """Bütün kesitleri aynı anda gösteren, kesit seçilebilir ızgara."""
     cols = st.columns(grid_cols)
     for idx, path in enumerate(files):
         fname = Path(path).name
         with cols[idx % grid_cols]:
             with st.container(border=True):
-                img = thumbnail(path, *win)
+                img = thumbnail(path, *win, size=150)
                 if img is None:
                     st.error("Görüntü okunamadı")
                 else:
@@ -668,8 +673,8 @@ def _render_all_slice_cards(files, patient, category, active_key, win, grid_cols
                     key=f"batch-open::{patient}::{category}::{idx}",
                     type="primary" if is_active else "secondary",
                     use_container_width=True,
-                    on_click=_set_active_slice,
-                    args=(active_key, fname),
+                    on_click=_activate_midline_slice if detail_key else _set_active_slice,
+                    args=(active_key, fname, detail_key) if detail_key else (active_key, fname),
                 )
 
 
@@ -683,14 +688,19 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
     all_names = [Path(path).name for path in all_files]
     unique_names = list(dict.fromkeys(ssa_names + all_names))
 
+    midline_status_key = f"batch::{patient}::midline-status"
+    if midline_status_key not in st.session_state:
+        prior_midline = df_ann[
+            (df_ann["doctor_name"].astype(str) == doctor)
+            & (df_ann["patient_id"].astype(str) == patient)
+            & df_ann["midline_shift_status"].astype(str).isin(MIDLINE_OPTIONS)
+        ]
+        st.session_state[midline_status_key] = (
+            prior_midline.iloc[-1]["midline_shift_status"] if not prior_midline.empty else None
+        )
+
     for fname in ssa_names:
-        status_key = _batch_key(patient, "midline", fname)
         points_key = _batch_key(patient, "points", fname)
-        if status_key not in st.session_state:
-            saved = find_existing(df_ann, doctor, patient, "ssa", fname)
-            if saved is None:
-                saved = find_existing(df_ann, doctor, patient, "all", fname)
-            st.session_state[status_key] = choice_from_row(saved, "midline_shift_status", MIDLINE_OPTIONS)
         if points_key not in st.session_state:
             saved = find_existing(df_ann, doctor, patient, "ssa", fname)
             if saved is None:
@@ -713,37 +723,51 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
     if all_names and st.session_state.get(basal_active_key) not in all_names:
         st.session_state[basal_active_key] = all_names[0]
 
-    midline_complete = sum(
-        st.session_state[_batch_key(patient, "midline", fname)] == MIDLINE_NO
-        or (
-            st.session_state[_batch_key(patient, "midline", fname)] == MIDLINE_YES
-            and len(st.session_state[_batch_key(patient, "points", fname)]) == 3
-        )
-        for fname in ssa_names
+    midline_status = st.session_state[midline_status_key]
+    midline_complete = (
+        len(ssa_names) if midline_status == MIDLINE_NO else
+        sum(len(st.session_state[_batch_key(patient, "points", fname)]) == 3 for fname in ssa_names)
+        if midline_status == MIDLINE_YES else 0
     )
     basal_status = st.session_state[basal_key]
     basal_complete = int(basal_status in BASAL_OPTIONS)
 
     st.markdown("### 🧭 Midline Shift · SSA kesitleri")
-    st.caption("Yalnızca SSA seçilmiş kesitler gösterilir. Her kesitte durumu seçin; 'Var' seçildiğinde büyütülmüş görüntü üzerinden üç noktayı sırayla işaretleyin.")
-    st.progress(midline_complete / max(len(ssa_names), 1), text=f"Midline tamamlandı: {midline_complete}/{len(ssa_names)}")
-    _render_all_slice_cards(ssa_files, patient, "midline", mid_active_key, win, grid_cols)
+    st.caption("Midline durumu bir kez belirlenir. 'Var' seçildiğinde yalnızca SSA kesitleri gösterilir ve her kesitte üç nokta sırayla işaretlenir.")
+    st.radio("Midline shift durumu (tüm SSA kesitleri için)", MIDLINE_OPTIONS,
+             key=midline_status_key, index=None, horizontal=True)
+    if midline_status == MIDLINE_YES:
+        st.progress(midline_complete / max(len(ssa_names), 1), text=f"Üç nokta tamamlanan SSA kesiti: {midline_complete}/{len(ssa_names)}")
+        if not st.session_state.get(f"batch::{patient}::midline-detail-open", False):
+            _render_all_slice_cards(
+                ssa_files, patient, "midline", mid_active_key, win, grid_cols,
+                detail_key=f"batch::{patient}::midline-detail-open",
+            )
+    elif midline_status == MIDLINE_NO:
+        st.success("Midline shift yok olarak tüm SSA kesitleri işaretlendi; nokta seçimi gerekmiyor.")
 
     active_midline = st.session_state.get(mid_active_key)
-    if active_midline:
+    if active_midline and st.session_state.get(f"batch::{patient}::midline-detail-open", False):
         path = next((p for p in ssa_files if Path(p).name == active_midline), None)
         if path:
             st.markdown(f"#### Midline Shift seçimi · {active_midline}")
+            st.button(
+                "← SSA kesit ızgarasına dön",
+                key=f"batch-midline-grid::{patient}",
+                on_click=_set_active_slice,
+                args=(f"batch::{patient}::midline-detail-open", False),
+            )
             try:
                 arr, spacing = load_slice(path)
                 base_img = apply_window(arr, *win)
                 img_w, img_h = base_img.size
-                status_key = _batch_key(patient, "midline", active_midline)
+                st.session_state[f"batch::{patient}::meta::{active_midline}"] = {
+                    "spacing": spacing, "img_w": img_w, "img_h": img_h,
+                }
                 points_key = _batch_key(patient, "points", active_midline)
                 control_col, image_col = st.columns([1, 2], gap="large")
                 with control_col:
-                    st.radio("Midline shift durumu", MIDLINE_OPTIONS, key=status_key, index=None)
-                    if st.session_state[status_key] == MIDLINE_YES:
+                    if midline_status == MIDLINE_YES:
                         pts = st.session_state[points_key]
                         st.markdown(stepper_html(len(pts)), unsafe_allow_html=True)
                         undo_col, clear_col = st.columns(2)
@@ -755,10 +779,8 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                             st.info(f"Görüntüye tıklayarak {3 - len(pts)} noktayı daha girin.")
                         else:
                             st.success("Üç noktanın tamamı seçildi.")
-                    elif st.session_state[status_key] == MIDLINE_NO:
-                        st.info("Midline shift yok; bu kesitte üç nokta gerekmez.")
 
-                if st.session_state[status_key] == MIDLINE_YES:
+                if midline_status == MIDLINE_YES:
                     with image_col:
                         scale = min(disp_w / img_w, 1.0)
                         pts = st.session_state[points_key]
@@ -774,6 +796,19 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                                 if len(pts) < 3:
                                     factor = img_w / (coords.get("width") or display_img.width)
                                     pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
+                                    if len(pts) == 3:
+                                        next_fname = next(
+                                            (
+                                                fname for fname in ssa_names
+                                                if fname != active_midline
+                                                and len(st.session_state[_batch_key(patient, "points", fname)]) < 3
+                                            ),
+                                            None,
+                                        )
+                                        if next_fname:
+                                            st.session_state[mid_active_key] = next_fname
+                                        else:
+                                            st.session_state[f"batch::{patient}::midline-detail-open"] = False
                                     st.rerun()
                         st.caption(f"{img_w}×{img_h} px · 1: Falx ön, 2: Falx arka, 3: kayan yapı")
                         if metrics:
@@ -783,27 +818,32 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
                 st.error(f"DICOM okunamadı ({active_midline}): {e}")
 
     st.markdown("---")
-    st.markdown("### 📋 Bazal Sistern · tüm kesitler")
-    st.caption("Tüm mevcut kesitler aynı anda gösterilir. Kesit seçildiğinde büyütülür; bazal sistern seçim paneli görüntünün altında yer alır.")
-    st.progress(basal_complete, text=f"Bazal sistern: {'Seçildi ve tüm kesitlere uygulanacak' if basal_complete else 'Henüz seçilmedi'}")
-    _render_all_slice_cards(all_files, patient, "basal", basal_active_key, win, grid_cols)
+    if midline_complete == len(ssa_names):
+        st.markdown("### 📋 Bazal Sistern · tüm kesitler")
+        st.caption("Bazal sistern durumu bir kez seçilir ve tüm kesitlere uygulanır.")
+        basal_left, basal_right = st.columns([1, 3], gap="large")
+        with basal_left:
+            st.radio("Bazal sistern durumu (tüm kesitlere uygulanır)", BASAL_OPTIONS,
+                     key=basal_key, index=None)
+            st.progress(basal_complete, text="Seçildi" if basal_complete else "Henüz seçilmedi")
+        with basal_right:
+            _render_all_slice_cards(all_files, patient, "basal", basal_active_key, win, grid_cols)
+            active_basal = st.session_state.get(basal_active_key)
+            if active_basal:
+                path = next((p for p in all_files if Path(p).name == active_basal), None)
+                if path:
+                    st.markdown(f"#### Büyütülmüş kesit · {active_basal}")
+                    try:
+                        arr, _ = load_slice(path)
+                        img = apply_window(arr, *win)
+                        img.thumbnail((disp_w, disp_w))
+                        st.image(img, caption=active_basal, width=img.width)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"DICOM okunamadı ({active_basal}): {e}")
+    else:
+        st.info("Midline seçimi tamamlandığında bazal sistern bölümü açılacak.")
 
-    active_basal = st.session_state.get(basal_active_key)
-    if active_basal:
-        path = next((p for p in all_files if Path(p).name == active_basal), None)
-        if path:
-            st.markdown(f"#### Bazal sistern seçimi · {active_basal}")
-            try:
-                arr, _ = load_slice(path)
-                img = apply_window(arr, *win)
-                img.thumbnail((disp_w, disp_w))
-                st.image(img, caption=active_basal, width=img.width)
-            except Exception as e:  # noqa: BLE001
-                st.error(f"DICOM okunamadı ({active_basal}): {e}")
-                st.radio("Bazal sistern durumu (seçim tüm kesitlere uygulanır)", BASAL_OPTIONS,
-                     key=basal_key, index=None, horizontal=True)
-
-            all_complete = bool(ssa_names and all_names) and midline_complete == len(ssa_names) and basal_complete == 1
+    all_complete = bool(ssa_names and all_names) and midline_complete == len(ssa_names) and basal_complete == 1
     st.markdown("---")
     if not all_complete:
         st.info("Not alanı, her SSA kesitinin midline durumu (Var ise üç nokta dahil) ve bazal sistern için tek ortak seçim tamamlandıktan sonra açılır.")
@@ -833,15 +873,13 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
         for idx, fname in enumerate(unique_names):
             source = "ssa" if fname in ssa_name_set else "all"
             slice_idx = ssa_index[fname] if fname in ssa_index else all_index[fname]
-            path = file_by_name[fname]
-            try:
-                array, spacing = load_slice(path)
-                img_h, img_w = array.shape[:2]
-            except Exception:  # noqa: BLE001
-                spacing, img_w, img_h = None, None, None
             has_midline = fname in ssa_name_set
             pts = st.session_state[_batch_key(patient, "points", fname)] if has_midline else []
-            midline = st.session_state[_batch_key(patient, "midline", fname)] if has_midline else None
+            midline = st.session_state[midline_status_key] if has_midline else None
+            metadata = st.session_state.get(f"batch::{patient}::meta::{fname}", {})
+            spacing = metadata.get("spacing")
+            img_w = metadata.get("img_w")
+            img_h = metadata.get("img_h")
             metrics = shift_metrics(pts, spacing) if midline == MIDLINE_YES and len(pts) == 3 else None
             record = {
                 "doctor_name": doctor.strip(), "patient_id": patient,
