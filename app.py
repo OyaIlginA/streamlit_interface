@@ -759,8 +759,6 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
     # Midline Shift — tek Var/Yok kararı, SSA kesitlerinde ayrı ayrı üç nokta.
     st.markdown("### 🧭 Midline Shift · SSA kesitleri")
     st.caption("Var/Yok bir kez seçilir. 'Var' ise soldaki SSA kesitlerinden seçim yapın; sağdaki büyük görüntüde her kesit için üç nokta işaretleyin.")
-    st.radio("Midline shift durumu (tüm SSA kesitleri için)", MIDLINE_OPTIONS,
-             key=midline_key, index=None, horizontal=True)
 
     if midline_status == MIDLINE_YES:
         if ssa_files:
@@ -827,6 +825,10 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
             st.warning("Bu hasta için SSA kesiti bulunamadı.")
     elif midline_status == MIDLINE_NO:
         st.success("Midline shift yok; bu karar tüm SSA kesitlerine uygulanır.")
+
+    st.markdown("#### Midline shift durumu (tüm SSA kesitleri için)")
+    st.radio("Midline shift durumu (tüm SSA kesitleri için)", MIDLINE_OPTIONS,
+             key=midline_key, index=None, horizontal=True)
 
     # Bazal Sistern — sol liste, sağ büyük görüntü; tek seçim en altta.
     st.markdown("---")
