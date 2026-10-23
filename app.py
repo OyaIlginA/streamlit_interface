@@ -758,77 +758,76 @@ def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ss
 
     # Midline Shift — tek Var/Yok kararı, SSA kesitlerinde ayrı ayrı üç nokta.
     st.markdown("### 🧭 Midline Shift · SSA kesitleri")
-    st.caption("Var/Yok bir kez seçilir. 'Var' ise soldaki SSA kesitlerinden seçim yapın; sağdaki büyük görüntüde her kesit için üç nokta işaretleyin.")
+    st.caption("SSA kesitleri ve üç nokta seçim alanı önce gösterilir. Görüntüleri inceledikten sonra Var/Yok kararını bölümün altından bir kez seçin.")
 
-    if midline_status == MIDLINE_YES:
-        if ssa_files:
-            st.progress(midline_complete / len(ssa_names),
-                        text=f"Üç noktası tamamlanan kesit: {midline_complete}/{len(ssa_names)}")
-            list_col, view_col = st.columns([2, 3], gap="large")
-            with list_col:
-                _render_all_slice_cards(ssa_files, patient, "midline", mid_active_key,
-                                        win, list_cols, done=completed_points)
-            with view_col:
-                st.markdown('<span class="sticky-anchor"></span>', unsafe_allow_html=True)
-                active = st.session_state[mid_active_key]
-                path = next((p for p in ssa_files if Path(p).name == active), None)
-                if path:
-                    points_key = _batch_key(patient, "points", active)
-                    try:
-                        arr, spacing = load_slice(path)
-                        base_img = apply_window(arr, *win)
-                        img_w, img_h = base_img.size
-                        st.session_state[f"batch::{patient}::meta::{active}"] = {
-                            "spacing": spacing, "img_w": img_w, "img_h": img_h,
-                        }
-                        pts = st.session_state[points_key]
-                        st.markdown(
-                            f'<span class="chip">Kesit {ssa_names.index(active) + 1}/{len(ssa_names)}</span>'
-                            + stepper_inline_html(len(pts)), unsafe_allow_html=True,
-                        )
-                        undo_col, clear_col = st.columns(2)
-                        undo_col.button("↩️ Geri al", key=f"batch-undo::{patient}::{active}",
-                                        disabled=not pts, use_container_width=True,
-                                        on_click=undo_point, args=(points_key,))
-                        clear_col.button("🗑️ Temizle", key=f"batch-clear::{patient}::{active}",
-                                         disabled=not pts, use_container_width=True,
-                                         on_click=clear_points, args=(points_key,))
+    if ssa_files:
+        st.progress(len(completed_points) / len(ssa_names),
+                    text=f"Üç noktası tamamlanan kesit: {len(completed_points)}/{len(ssa_names)}")
+        list_col, view_col = st.columns([2, 3], gap="large")
+        with list_col:
+            _render_all_slice_cards(ssa_files, patient, "midline", mid_active_key,
+                                    win, list_cols, done=completed_points)
+        with view_col:
+            st.markdown('<span class="sticky-anchor"></span>', unsafe_allow_html=True)
+            active = st.session_state[mid_active_key]
+            path = next((p for p in ssa_files if Path(p).name == active), None)
+            if path:
+                points_key = _batch_key(patient, "points", active)
+                try:
+                    arr, spacing = load_slice(path)
+                    base_img = apply_window(arr, *win)
+                    img_w, img_h = base_img.size
+                    st.session_state[f"batch::{patient}::meta::{active}"] = {
+                        "spacing": spacing, "img_w": img_w, "img_h": img_h,
+                    }
+                    pts = st.session_state[points_key]
+                    st.markdown(
+                        f'<span class="chip">Kesit {ssa_names.index(active) + 1}/{len(ssa_names)}</span>'
+                        + stepper_inline_html(len(pts)), unsafe_allow_html=True,
+                    )
+                    undo_col, clear_col = st.columns(2)
+                    undo_col.button("↩️ Geri al", key=f"batch-undo::{patient}::{active}",
+                                    disabled=not pts, use_container_width=True,
+                                    on_click=undo_point, args=(points_key,))
+                    clear_col.button("🗑️ Temizle", key=f"batch-clear::{patient}::{active}",
+                                     disabled=not pts, use_container_width=True,
+                                     on_click=clear_points, args=(points_key,))
 
-                        scale = min(min(disp_w, 640) / img_w, 1.0)
-                        metrics = shift_metrics(pts, spacing) if len(pts) == 3 else None
-                        display_img = draw_overlay(base_img, pts, scale, metrics)
-                        coords = streamlit_image_coordinates(display_img, key=f"batch-click::{patient}::{active}")
-                        if coords is not None:
-                            click_key = f"batch-lastclick::{patient}::{active}"
-                            if coords.get("unix_time") != st.session_state.get(click_key):
-                                st.session_state[click_key] = coords.get("unix_time")
-                                if len(pts) < 3:
-                                    factor = img_w / (coords.get("width") or display_img.width)
-                                    pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
-                                    if len(pts) == 3:
-                                        next_fname = next(
-                                            (fname for fname in ssa_names if fname != active
-                                             and len(st.session_state[_batch_key(patient, "points", fname)]) < 3),
-                                            None,
-                                        )
-                                        if next_fname:
-                                            st.session_state[mid_active_key] = next_fname
-                                    st.rerun()
-                        if len(pts) < 3:
-                            st.caption(f"{img_w}×{img_h} px · {3 - len(pts)} nokta daha seçin.")
-                        else:
-                            value = f"{metrics['mm']:.1f} mm" if metrics and metrics["mm"] is not None else (f"{metrics['px']:.0f} px" if metrics else "-")
-                            st.caption(f"{img_w}×{img_h} px · ✓ 3 nokta tamam · Tahmini shift: {value}")
-                    except Exception as e:  # noqa: BLE001
-                        st.error(f"DICOM okunamadı ({active}): {e}")
-        else:
-            st.warning("Bu hasta için SSA kesiti bulunamadı.")
-    elif midline_status == MIDLINE_NO:
-        st.success("Midline shift yok; bu karar tüm SSA kesitlerine uygulanır.")
+                    scale = min(min(disp_w, 640) / img_w, 1.0)
+                    metrics = shift_metrics(pts, spacing) if len(pts) == 3 else None
+                    display_img = draw_overlay(base_img, pts, scale, metrics)
+                    coords = streamlit_image_coordinates(display_img, key=f"batch-click::{patient}::{active}")
+                    if coords is not None:
+                        click_key = f"batch-lastclick::{patient}::{active}"
+                        if coords.get("unix_time") != st.session_state.get(click_key):
+                            st.session_state[click_key] = coords.get("unix_time")
+                            if len(pts) < 3:
+                                factor = img_w / (coords.get("width") or display_img.width)
+                                pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
+                                if len(pts) == 3:
+                                    next_fname = next(
+                                        (fname for fname in ssa_names if fname != active
+                                         and len(st.session_state[_batch_key(patient, "points", fname)]) < 3),
+                                        None,
+                                    )
+                                    if next_fname:
+                                        st.session_state[mid_active_key] = next_fname
+                                st.rerun()
+                    if len(pts) < 3:
+                        st.caption(f"{img_w}×{img_h} px · {3 - len(pts)} nokta daha seçin.")
+                    else:
+                        value = f"{metrics['mm']:.1f} mm" if metrics and metrics["mm"] is not None else (f"{metrics['px']:.0f} px" if metrics else "-")
+                        st.caption(f"{img_w}×{img_h} px · ✓ 3 nokta tamam · Tahmini shift: {value}")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"DICOM okunamadı ({active}): {e}")
+    else:
+        st.warning("Bu hasta için SSA kesiti bulunamadı.")
 
     st.markdown("#### Midline shift durumu (tüm SSA kesitleri için)")
     st.radio("Midline shift durumu (tüm SSA kesitleri için)", MIDLINE_OPTIONS,
              key=midline_key, index=None, horizontal=True)
+    if midline_status == MIDLINE_NO:
+        st.success("Midline shift yok; bu karar tüm SSA kesitlerine uygulanır.")
 
     # Bazal Sistern — sol liste, sağ büyük görüntü; tek seçim en altta.
     st.markdown("---")
