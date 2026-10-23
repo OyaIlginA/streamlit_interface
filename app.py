@@ -641,31 +641,270 @@ def render_detail(files, patient, source, doctor, df_ann, win, disp_w, advance, 
 # ══════════════════════════════════════════════════════════════════
 # SEKMELER
 # ══════════════════════════════════════════════════════════════════
+def _batch_key(patient: str, category: str, fname: str) -> str:
+    return f"batch::{patient}::{category}::{fname}"
+
+
+def _set_active_slice(key: str, fname: str):
+    st.session_state[key] = fname
+
+
+def _render_all_slice_cards(files, patient, category, active_key, win, grid_cols):
+    """Bütün kesitleri aynı anda gösteren, kesit seçilebilir ızgara."""
+    cols = st.columns(grid_cols)
+    for idx, path in enumerate(files):
+        fname = Path(path).name
+        with cols[idx % grid_cols]:
+            with st.container(border=True):
+                img = thumbnail(path, *win)
+                if img is None:
+                    st.error("Görüntü okunamadı")
+                else:
+                    st.image(img, use_container_width=True)
+                st.caption(f"Kesit {idx + 1} · {fname}")
+                is_active = st.session_state.get(active_key) == fname
+                st.button(
+                    "✓ Seçili" if is_active else "🔍 Büyüt / seç",
+                    key=f"batch-open::{patient}::{category}::{idx}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                    on_click=_set_active_slice,
+                    args=(active_key, fname),
+                )
+
+
+def _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ssa_files, all_files):
+    """SSA kesitlerinde midline, tüm kesitlerde bazal seçimlerini alıp topluca kaydet."""
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        {"success": st.success, "warning": st.warning, "error": st.error}[flash[0]](flash[1])
+
+    ssa_names = [Path(path).name for path in ssa_files]
+    all_names = [Path(path).name for path in all_files]
+    unique_names = list(dict.fromkeys(ssa_names + all_names))
+
+    for fname in ssa_names:
+        status_key = _batch_key(patient, "midline", fname)
+        points_key = _batch_key(patient, "points", fname)
+        if status_key not in st.session_state:
+            saved = find_existing(df_ann, doctor, patient, "ssa", fname)
+            if saved is None:
+                saved = find_existing(df_ann, doctor, patient, "all", fname)
+            st.session_state[status_key] = choice_from_row(saved, "midline_shift_status", MIDLINE_OPTIONS)
+        if points_key not in st.session_state:
+            saved = find_existing(df_ann, doctor, patient, "ssa", fname)
+            if saved is None:
+                saved = find_existing(df_ann, doctor, patient, "all", fname)
+            st.session_state[points_key] = points_from_row(saved) if saved is not None else []
+
+    for fname in all_names:
+        basal_key = _batch_key(patient, "basal", fname)
+        if basal_key not in st.session_state:
+            saved = find_existing(df_ann, doctor, patient, "all", fname)
+            if saved is None and fname in ssa_names:
+                saved = find_existing(df_ann, doctor, patient, "ssa", fname)
+            st.session_state[basal_key] = choice_from_row(saved, "basal_status", BASAL_OPTIONS)
+
+    mid_active_key = f"batch::{patient}::active-midline"
+    basal_active_key = f"batch::{patient}::active-basal"
+    if ssa_names and st.session_state.get(mid_active_key) not in ssa_names:
+        st.session_state[mid_active_key] = ssa_names[0]
+    if all_names and st.session_state.get(basal_active_key) not in all_names:
+        st.session_state[basal_active_key] = all_names[0]
+
+    midline_complete = sum(
+        st.session_state[_batch_key(patient, "midline", fname)] == MIDLINE_NO
+        or (
+            st.session_state[_batch_key(patient, "midline", fname)] == MIDLINE_YES
+            and len(st.session_state[_batch_key(patient, "points", fname)]) == 3
+        )
+        for fname in ssa_names
+    )
+    basal_complete = sum(
+        st.session_state[_batch_key(patient, "basal", fname)] in BASAL_OPTIONS
+        for fname in all_names
+    )
+
+    st.markdown("### 🧭 Midline Shift · SSA kesitleri")
+    st.caption("Yalnızca SSA seçilmiş kesitler gösterilir. Her kesitte durumu seçin; 'Var' seçildiğinde büyütülmüş görüntü üzerinden üç noktayı sırayla işaretleyin.")
+    st.progress(midline_complete / max(len(ssa_names), 1), text=f"Midline tamamlandı: {midline_complete}/{len(ssa_names)}")
+    _render_all_slice_cards(ssa_files, patient, "midline", mid_active_key, win, grid_cols)
+
+    active_midline = st.session_state.get(mid_active_key)
+    if active_midline:
+        path = next((p for p in ssa_files if Path(p).name == active_midline), None)
+        if path:
+            st.markdown(f"#### Midline Shift seçimi · {active_midline}")
+            try:
+                arr, spacing = load_slice(path)
+                base_img = apply_window(arr, *win)
+                img_w, img_h = base_img.size
+                status_key = _batch_key(patient, "midline", active_midline)
+                points_key = _batch_key(patient, "points", active_midline)
+                control_col, image_col = st.columns([1, 2], gap="large")
+                with control_col:
+                    st.radio("Midline shift durumu", MIDLINE_OPTIONS, key=status_key, index=None)
+                    if st.session_state[status_key] == MIDLINE_YES:
+                        pts = st.session_state[points_key]
+                        st.markdown(stepper_html(len(pts)), unsafe_allow_html=True)
+                        undo_col, clear_col = st.columns(2)
+                        undo_col.button("↩️ Geri al", key=f"batch-undo::{patient}::{active_midline}",
+                                         disabled=not pts, on_click=undo_point, args=(points_key,))
+                        clear_col.button("🗑️ Temizle", key=f"batch-clear::{patient}::{active_midline}",
+                                          disabled=not pts, on_click=clear_points, args=(points_key,))
+                        if len(pts) < 3:
+                            st.info(f"Görüntüye tıklayarak {3 - len(pts)} noktayı daha girin.")
+                        else:
+                            st.success("Üç noktanın tamamı seçildi.")
+                    elif st.session_state[status_key] == MIDLINE_NO:
+                        st.info("Midline shift yok; bu kesitte üç nokta gerekmez.")
+
+                if st.session_state[status_key] == MIDLINE_YES:
+                    with image_col:
+                        scale = min(disp_w / img_w, 1.0)
+                        pts = st.session_state[points_key]
+                        metrics = shift_metrics(pts, spacing) if len(pts) == 3 else None
+                        display_img = draw_overlay(base_img, pts, scale, metrics)
+                        coords = streamlit_image_coordinates(
+                            display_img, key=f"batch-click::{patient}::{active_midline}"
+                        )
+                        if coords is not None:
+                            click_key = f"batch-lastclick::{patient}::{active_midline}"
+                            if coords.get("unix_time") != st.session_state.get(click_key):
+                                st.session_state[click_key] = coords.get("unix_time")
+                                if len(pts) < 3:
+                                    factor = img_w / (coords.get("width") or display_img.width)
+                                    pts.append((round(coords["x"] * factor, 1), round(coords["y"] * factor, 1)))
+                                    st.rerun()
+                        st.caption(f"{img_w}×{img_h} px · 1: Falx ön, 2: Falx arka, 3: kayan yapı")
+                        if metrics:
+                            value = f"{metrics['mm']:.1f} mm" if metrics["mm"] is not None else f"{metrics['px']:.0f} px"
+                            st.metric("Tahmini midline shift", value)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"DICOM okunamadı ({active_midline}): {e}")
+
+    st.markdown("---")
+    st.markdown("### 📋 Bazal Sistern · tüm kesitler")
+    st.caption("Tüm mevcut kesitler aynı anda gösterilir. Kesit seçildiğinde büyütülür; bazal sistern seçim paneli görüntünün altında yer alır.")
+    st.progress(basal_complete / max(len(all_names), 1), text=f"Bazal sistern tamamlandı: {basal_complete}/{len(all_names)}")
+    _render_all_slice_cards(all_files, patient, "basal", basal_active_key, win, grid_cols)
+
+    active_basal = st.session_state.get(basal_active_key)
+    if active_basal:
+        path = next((p for p in all_files if Path(p).name == active_basal), None)
+        if path:
+            st.markdown(f"#### Bazal sistern seçimi · {active_basal}")
+            try:
+                arr, _ = load_slice(path)
+                img = apply_window(arr, *win)
+                img.thumbnail((disp_w, disp_w))
+                st.image(img, caption=active_basal, width=img.width)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"DICOM okunamadı ({active_basal}): {e}")
+            st.radio("Bazal sistern durumu", BASAL_OPTIONS,
+                     key=_batch_key(patient, "basal", active_basal), index=None, horizontal=True)
+
+    all_complete = bool(ssa_names and all_names) and midline_complete == len(ssa_names) and basal_complete == len(all_names)
+    st.markdown("---")
+    if not all_complete:
+        st.info("Not alanı, her SSA kesitinin midline durumu (Var ise üç nokta dahil) ve tüm kesitlerin bazal sistern seçimi tamamlandıktan sonra açılır.")
+        return
+
+    st.markdown("### 📝 Not ve kayıt")
+    notes_key = f"batch::{patient}::notes"
+    if notes_key not in st.session_state:
+        prior = df_ann[
+            (df_ann["doctor_name"].astype(str) == doctor)
+            & (df_ann["patient_id"].astype(str) == patient)
+        ]["notes"].dropna().astype(str)
+        st.session_state[notes_key] = prior.iloc[-1] if not prior.empty else ""
+    st.text_area("Tüm seçimler için ortak not", key=notes_key, height=110,
+                 placeholder="Gözlem, şüphe, yorum…")
+
+    def save_batch():
+        if not doctor.strip():
+            st.session_state.flash = ("error", "Doktor adı zorunludur.")
+            return
+        records = []
+        file_by_name = {Path(p).name: p for p in ssa_files + all_files}
+        ssa_name_set, all_name_set = set(ssa_names), set(all_names)
+        ssa_index = {Path(path).name: idx for idx, path in enumerate(ssa_files)}
+        all_index = {Path(path).name: idx for idx, path in enumerate(all_files)}
+        for idx, fname in enumerate(unique_names):
+            source = "ssa" if fname in ssa_name_set else "all"
+            slice_idx = ssa_index[fname] if fname in ssa_index else all_index[fname]
+            path = file_by_name[fname]
+            try:
+                array, spacing = load_slice(path)
+                img_h, img_w = array.shape[:2]
+            except Exception:  # noqa: BLE001
+                spacing, img_w, img_h = None, None, None
+            has_midline = fname in ssa_name_set
+            pts = st.session_state[_batch_key(patient, "points", fname)] if has_midline else []
+            midline = st.session_state[_batch_key(patient, "midline", fname)] if has_midline else None
+            metrics = shift_metrics(pts, spacing) if midline == MIDLINE_YES and len(pts) == 3 else None
+            record = {
+                "doctor_name": doctor.strip(), "patient_id": patient,
+                "slice_source": source, "slice_file": fname, "slice_idx": slice_idx,
+                "img_w": img_w, "img_h": img_h, "pixel_spacing_mm": spacing,
+                "midline_shift_status": midline,
+                "falx_ant_x": pts[0][0] if len(pts) == 3 else None,
+                "falx_ant_y": pts[0][1] if len(pts) == 3 else None,
+                "falx_post_x": pts[1][0] if len(pts) == 3 else None,
+                "falx_post_y": pts[1][1] if len(pts) == 3 else None,
+                "shift_point_x": pts[2][0] if len(pts) == 3 else None,
+                "shift_point_y": pts[2][1] if len(pts) == 3 else None,
+                "midline_shift_px": round(metrics["px"], 2) if metrics else None,
+                "midline_shift_mm": round(metrics["mm"], 2) if metrics and metrics["mm"] is not None else None,
+                "basal_status": st.session_state[_batch_key(patient, "basal", fname)] if fname in all_name_set else None,
+                "notes": st.session_state[notes_key], "timestamp": str(pd.Timestamp.now()),
+            }
+            record.update({k: v for k, v in patient_meta(patient).items() if k not in record})
+            records.append(record)
+
+        try:
+            hf_hub_download(repo_id=HF_REPO_ID, filename=ANNOTATION_FILE, repo_type="dataset",
+                            token=HF_TOKEN, local_dir=".", force_download=True)
+        except Exception:  # noqa: BLE001
+            pass
+        old = annotations_df()
+        for record in records:
+            for col in record:
+                if col not in old.columns:
+                    old[col] = None
+        targeted = set(unique_names)
+        remove = (
+            (old["doctor_name"].astype(str) == doctor.strip())
+            & (old["patient_id"].astype(str) == patient)
+            & old["slice_file"].astype(str).isin(targeted)
+        )
+        updated = pd.concat([old[~remove], pd.DataFrame(records)], ignore_index=True)
+        updated.to_csv(ANNOTATION_PATH, index=False)
+        try:
+            HfApi(token=HF_TOKEN).upload_file(
+                path_or_fileobj=str(ANNOTATION_PATH), path_in_repo=ANNOTATION_FILE,
+                repo_id=HF_REPO_ID, repo_type="dataset",
+                commit_message=f"{doctor.strip()}: {patient} toplu kesit etiketleri",
+            )
+            st.session_state.flash = ("success", f"{patient} için tüm seçimler kaydedildi ve Hub'a gönderildi.")
+        except Exception as e:  # noqa: BLE001
+            st.session_state.flash = ("warning", f"Yerel kayıt yapıldı, Hub'a yüklenemedi: {e}")
+
+    st.button("💾 Tüm seçimleri kaydet", type="primary", use_container_width=True,
+              disabled=not doctor.strip(), on_click=save_batch)
+
+
 def render_slices_tab(root, patient, doctor, df_ann, win, disp_w, advance, grid_cols, ssa_n, all_n):
     flash = st.session_state.pop("flash", None)
     if flash:
         {"success": st.success, "warning": st.warning, "error": st.error}[flash[0]](flash[1])
 
-    options = [s for s, n in (("ssa", ssa_n), ("all", all_n)) if n > 0]
-    if not options:
+    ssa_files = list_slices(root, patient, "ssa")
+    all_files = list_slices(root, patient, "all")
+    if not ssa_files and not all_files:
         st.warning("Bu hasta için DICOM kesiti bulunamadı.")
         return
-    if st.session_state.get("source") not in options:
-        st.session_state.source = options[0]
-
-    labels = {"ssa": f"🎯 SSA seçili kesitler ({ssa_n})", "all": f"🩻 Tüm kesitler ({all_n})"}
-    # Her iki görünümde de çizilir (widget durumu kaybolmasın diye)
-    source = st.radio("Kesit kaynağı", options, key="source", horizontal=True,
-                      format_func=lambda s: labels[s], on_change=reset_slice,
-                      label_visibility="collapsed")
-
-    files = list_slices(root, patient, source)
-    st.session_state.cur_slice = min(max(st.session_state.get("cur_slice", 1), 1), len(files))
-
-    if st.session_state.get("detail_open"):
-        render_detail(files, patient, source, doctor, df_ann, win, disp_w, advance, grid_cols)
-    else:
-        render_grid(files, patient, source, doctor, df_ann, win, grid_cols)
+    _render_batch_annotation(patient, doctor, df_ann, win, disp_w, grid_cols, ssa_files, all_files)
 
 
 def render_history_tab(patient, df_ann):
