@@ -147,17 +147,16 @@ def ensure_data() -> str | None:
 
 
 @st.cache_resource(show_spinner=False)
-def pull_annotations_once() -> None:
-    """Uygulama ilk açıldığında Hub'daki güncel annotation dosyasını getirir."""
-    if ANNOTATION_PATH.exists():
-        return
+def pull_annotations_once() -> str | None:
+    """Uygulama başlarken Hub'daki güncel annotation dosyasını yerel kopyaya alır."""
     try:
         hf_hub_download(
             repo_id=HF_REPO_ID, filename=ANNOTATION_FILE, repo_type="dataset",
-            token=HF_TOKEN, local_dir=".",
+            token=HF_TOKEN, local_dir=".", force_download=True,
         )
-    except Exception:  # noqa: BLE001  (dosya henüz yok olabilir)
-        pass
+        return None
+    except Exception as e:  # noqa: BLE001
+        return str(e)
 
 
 def _has_dicom(d: Path) -> bool:
@@ -1005,7 +1004,15 @@ if err:
         st.rerun()
     st.stop()
 
-pull_annotations_once()
+annotation_sync_error = pull_annotations_once()
+if annotation_sync_error:
+    st.warning(
+        "Hugging Face'teki kayıtlar alınamadı. "
+        f"Yerel CSV varsa o kullanılacak. Hata: {annotation_sync_error}"
+    )
+    if st.button("🔄 Kayıtları yeniden yükle"):
+        pull_annotations_once.clear()
+        st.rerun()
 root, patients = discover_patients(str(LOCAL_DATA_DIR))
 if not patients:
     st.warning("Hasta klasörü bulunamadı. HF repo adını ve zip yapısını kontrol edin.")
